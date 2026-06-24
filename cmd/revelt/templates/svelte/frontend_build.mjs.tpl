@@ -9,8 +9,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const configPath = resolve(__dirname, '../revelt.json');
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
-// Component directory relative to the frontend source directory,
-// defaulting to "components" when the key is absent from config.
 const componentDirName = config.component_dir ?? 'components';
 const componentDir = resolve(__dirname, componentDirName);
 
@@ -29,7 +27,6 @@ function readModeAnnotation(filePath) {
     const source = fs.readFileSync(filePath, 'utf8');
     const lines = source.split('\n', SEARCH_LINES);
     for (const line of lines) {
-        // Matches annotations in any comment style: //, /*, or * (JSDoc line)
         const m = line.match(/@mode\s+(ssr|hydrate|client)/);
         if (m) {
             return /** @type {ComponentMode} */ (m[1]);
@@ -125,12 +122,85 @@ function componentRegistryPlugin(comps) {
     };
 }
 
+function injectAssets() {
+    const staticPrefix = config.static_prefix ?? '/static/';
+    const scripts = [];
+    const styles = [];
+
+    const clientDist = resolve(__dirname, 'dist/client');
+    if (fs.existsSync(clientDist)) {
+        const files = fs.readdirSync(clientDist);
+        for (const file of files) {
+            if (file.endsWith('.js')) {
+                scripts.push(`<script src="${staticPrefix}${file}" defer></script>`);
+            } else if (file.endsWith('.css')) {
+                styles.push(`<link rel="stylesheet" href="${staticPrefix}${file}">`);
+            }
+        }
+    }
+
+    const templatePath = resolve(__dirname, 'index.html');
+    if (!fs.existsSync(templatePath)) return;
+
+    let html = fs.readFileSync(templatePath, 'utf8');
+
+    // Remove duplicates
+    html = html.replace(/<link rel="stylesheet" href="[^"]+">/g, '');
+    html = html.replace(/<script src="[^"]+" defer><\/script>/g, '');
+
+    if (styles.length > 0) {
+        html = html.replace('</head>', '    ' + styles.join('\n    ') + '\n</head>');
+    }
+    if (scripts.length > 0) {
+        html = html.replace('</body>', '    ' + scripts.join('\n    ') + '\n</body>');
+    }
+
+    const outPath = resolve(clientDist, 'index.html');
+    fs.mkdirSync(dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, html, 'utf8');
+
+    console.error(`[revelt] injected assets into ${outPath}`);
+}
+
+function htmlPlugin() {
+    return {
+        name: 'html-inject-plugin',
+        closeBundle() {
+            injectAssets();
+        }
+    };
+}
+
+const clientPlugins = [
+    svelte(),
+    componentRegistryPlugin(clientComponents),
+    htmlPlugin(),
+];
+
+const serverPlugins = [
+    svelte(),
+    componentRegistryPlugin(serverComponents),
+];
+
+const appCssPath = resolve(__dirname, 'src/app.css');
+if (fs.existsSync(appCssPath)) {
+    try {
+        const tailwind = (await import('@tailwindcss/vite')).default;
+        clientPlugins.push(tailwind());
+        serverPlugins.push(tailwind());
+    } catch (err) {
+        console.error('[revelt] @tailwindcss/vite not installed, skipping tailwind compilation');
+    }
+}
+
 /** @type {import('vite').UserConfig} */
 const serverConfig = {
-    plugins: [
-        svelte(),
-        componentRegistryPlugin(serverComponents),
-    ],
+    plugins: serverPlugins,
+    resolve: {
+        alias: {
+            '@': resolve(__dirname, 'src'),
+        },
+    },
     ssr: {
         noExternal: ['revelt:registry'],
     },
@@ -151,20 +221,25 @@ const serverConfig = {
 
 /** @type {import('vite').UserConfig} */
 const clientConfig = {
-    plugins: [
-        svelte(),
-        componentRegistryPlugin(clientComponents),
-    ],
+    plugins: clientPlugins,
+    resolve: {
+        alias: {
+            '@': resolve(__dirname, 'src'),
+        },
+    },
     build: {
         minify: !watchMode,
         sourcemap: watchMode,
         outDir: 'dist/client',
         emptyOutDir: false,
+        // Force Vite to extract CSS into a standalone file instead of inlining it
+        // cssCodeSplit: true, 
         rollupOptions: {
             input: 'client.js',
             output: {
                 format: 'iife',
                 entryFileNames: 'client.js',
+                assetFileNames: '[name].[ext]',
             },
         },
     },

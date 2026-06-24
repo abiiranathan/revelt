@@ -15,6 +15,6 @@
     "@types/react": "^18.3.1",
     "@types/react-dom": "^18.3.1",
     "esbuild": "^0.28.1",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4"{{TAILWIND_DEPS}}
   }
 }

@@ -18,7 +18,7 @@ import (
 	"github.com/abiiranathan/revelt/revelt"
 )
 
-//go:embed frontend/index.html
+//go:embed frontend/dist/client/index.html
 var indexPage string
 
 const (

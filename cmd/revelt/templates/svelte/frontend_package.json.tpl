@@ -11,8 +11,8 @@
     "svelte": "^5.56.3"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+   "@sveltejs/vite-plugin-svelte": "^5.0.3",
     "typescript": "^5.5.4",
-    "vite": "^6.3.0"
+    "vite": "^6.3.0"{{TAILWIND_DEPS}}
   }
 }

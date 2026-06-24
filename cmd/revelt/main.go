@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/abiiranathan/revelt/revelt"
@@ -44,12 +45,14 @@ func printUsage() {
 	fmt.Println("  dev    Start the development environment (watcher + server)")
 }
 
+// cmd/revelt/main.go
 func runInit() {
 	initCmd := flag.NewFlagSet("init", flag.ExitOnError)
 	frameworkOpt := initCmd.String("framework", "react", "Framework to use: react or svelte")
 	dirOpt := initCmd.String("dir", ".", "Directory to initialize the project in")
 	sourceDirOpt := initCmd.String("source-dir", "frontend", "Frontend source directory name (relative to --dir)")
-	componentDirOpt := initCmd.String("component-dir", "components", "Component subdirectory name (relative to --source-dir)")
+	componentDirOpt := initCmd.String("component-dir", "src/components", "Component subdirectory name (relative to --source-dir)")
+	tailwindOpt := initCmd.Bool("tailwind", false, "Set up Tailwind CSS v4")
 
 	if err := initCmd.Parse(os.Args[2:]); err != nil {
 		log.Fatalf("Error parsing flags: %v\n", err)
@@ -64,12 +67,25 @@ func runInit() {
 	sourceDir := *sourceDirOpt
 	componentDir := *componentDirOpt
 
-	// sourceDir is a bare name ("frontend"), but revelt.json wants a relative path.
 	sourceDirPath := "./" + sourceDir
 
+	tailwindDeps := ""
+	tailwindCSSImport := ""
+	if *tailwindOpt {
+		if framework == "react" {
+			tailwindDeps = ",\n    \"tailwindcss\": \"^4.0.0\",\n    \"@tailwindcss/postcss\": \"^4.0.0\",\n    \"postcss\": \"^8.4.38\""
+		} else {
+			tailwindDeps = ",\n    \"tailwindcss\": \"^4.0.0\",\n    \"@tailwindcss/vite\": \"^4.0.0\""
+			tailwindCSSImport = "import './src/app.css';\n"
+		}
+	}
+
 	vars := map[string]string{
-		"SOURCE_DIR":    sourceDirPath,
-		"COMPONENT_DIR": componentDir,
+		"SOURCE_DIR":          sourceDirPath,
+		"COMPONENT_DIR":       componentDir,
+		"TAILWIND":            strconv.FormatBool(*tailwindOpt),
+		"TAILWIND_DEPS":       tailwindDeps,
+		"TAILWIND_CSS_IMPORT": tailwindCSSImport,
 	}
 
 	fmt.Printf("Initializing revelt %s project in: %s\n", framework, targetDir)
@@ -80,21 +96,66 @@ func runInit() {
 		log.Fatalf("Error creating directory %s: %v\n", sourceDir, err)
 	}
 
-	var templates []FileTemplate
-	if framework == "react" {
-		templates = ReactTemplates(vars)
-	} else {
-		templates = SvelteTemplates(vars)
+	// Create dist/client directory structure early and write a placeholder template
+	// to prevent compile-time go:embed path failures on new project setups.
+	distClientDir := filepath.Join(targetDir, sourceDir, "dist", "client")
+	if err := os.MkdirAll(distClientDir, 0755); err != nil {
+		log.Fatalf("Error creating distribution folders: %v\n", err)
+	}
+	err := os.WriteFile(
+		filepath.Join(distClientDir, "index.html"),
+		IndexPageBytes,
+		0644,
+	)
+	if err != nil {
+		log.Fatalf("Error writing distribution index file: %s\n", err)
 	}
 
 	// index.html lives at the root of the source directory.
-	err := os.WriteFile(
+	err = os.WriteFile(
 		filepath.Join(targetDir, sourceDir, "index.html"),
 		IndexPageBytes,
 		0644,
 	)
 	if err != nil {
-		log.Fatalf("Error writing index file: %s\n", err)
+		log.Fatalf("Error writing template index file: %s\n", err)
+	}
+
+	// Create Tailwind folders & files if enabled
+	if *tailwindOpt {
+		appCssDir := filepath.Join(targetDir, sourceDir, "src")
+		_ = os.MkdirAll(appCssDir, 0755)
+		err := os.WriteFile(
+			filepath.Join(appCssDir, "app.css"),
+			[]byte("@import \"tailwindcss\";\n"),
+			0644,
+		)
+		if err != nil {
+			log.Fatalf("Error writing app.css file: %s\n", err)
+		}
+		fmt.Println("  Created src/app.css with Tailwind CSS v4 directive")
+
+		// ONLY create postcss.config.js for React.
+		// vite has native support in svelte.
+		if framework == "react" {
+			postcssConfig := "export default {\n  plugins: {\n    '@tailwindcss/postcss': {},\n  },\n};\n"
+			err = os.WriteFile(
+				filepath.Join(targetDir, sourceDir, "postcss.config.js"),
+				[]byte(postcssConfig),
+				0644,
+			)
+			if err != nil {
+				log.Fatalf("Error writing postcss.config.js file: %s\n", err)
+			}
+			fmt.Println("  Created postcss.config.js for editor autocompletion & style loaders")
+		}
+	}
+
+	var templates []FileTemplate
+	if framework == "react" {
+		templates = ReactTemplates(vars)
+	} else {
+		templates = SvelteTemplates(vars)
 	}
 
 	for _, t := range templates {

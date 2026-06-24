@@ -98,7 +98,7 @@ func LoadConfig(path string) (*ProjectConfig, error) {
 		cfg.StaticPrefix = "/static/"
 	}
 	if cfg.ComponentDir == "" {
-		cfg.ComponentDir = "components"
+		cfg.ComponentDir = "src/components"
 	}
 
 	cfg.ComponentModes, err = discoverComponentModes(cfg.SourceDir, cfg.ComponentDir)

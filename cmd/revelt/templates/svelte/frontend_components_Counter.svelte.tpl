@@ -6,7 +6,7 @@
   }
 
   let { title, initial = 0 }: Props = $props();
-  let count = $state(initial);
+  let count = $derived(initial);
 </script>
 
 <div class="counter" style="border: 1px solid #ccc; padding: 1rem; margin: 1rem 0;">

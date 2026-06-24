@@ -1,4 +1,4 @@
-import { hydrate, mount } from 'svelte';
+{{TAILWIND_CSS_IMPORT}}import { hydrate, mount } from 'svelte';
 import { COMPONENT_REGISTRY } from 'revelt:registry';
 
 function hydrateIslands() {

@@ -8,8 +8,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const configPath = resolve(__dirname, '../revelt.json');
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
-// Component directory relative to the frontend source directory,
-// defaulting to "components" when the key is absent from config.
 const componentDirName = config.component_dir ?? 'components';
 const componentDir = resolve(__dirname, componentDirName);
 
@@ -87,6 +85,9 @@ const serverBuildOptions = {
     target: 'node18',
     jsx: 'automatic',
     resolveExtensions: ['.tsx', '.ts', '.jsx', '.js', '.json'],
+    alias: {
+        '@': resolve(__dirname, 'src'), 
+    },
     sourcemap: watchMode ? 'inline' : false,
     logOverride: { 'ignored-bare-import': 'silent' },
     external: ['react', 'react-dom', 'react-dom/server'],
@@ -103,6 +104,9 @@ const clientBuildOptions = {
     target: 'es2020',
     jsx: 'automatic',
     resolveExtensions: ['.tsx', '.ts', '.jsx', '.js', '.json'],
+    alias: {
+        '@': resolve(__dirname, 'src'),
+    },
     sourcemap: watchMode ? 'inline' : false,
     logOverride: { 'ignored-bare-import': 'silent' },
     plugins: [componentRegistryPlugin(clientComponents)],
@@ -165,9 +169,85 @@ function componentRegistryPlugin(comps) {
     };
 }
 
+// PostCSS Processor compiled separately to maintain an esbuild dependency-free core
+async function buildCSS() {
+    const cssInput = resolve(__dirname, 'src/app.css');
+    if (!fs.existsSync(cssInput)) return;
+
+    try {
+        const postcss = (await import('postcss')).default;
+        const tailwindcss = (await import('@tailwindcss/postcss')).default;
+        const cssContent = fs.readFileSync(cssInput, 'utf8');
+        const result = await postcss([tailwindcss()]).process(cssContent, {
+            from: cssInput,
+            to: resolve(__dirname, 'dist/client/client.css'),
+        });
+        fs.mkdirSync(resolve(__dirname, 'dist/client'), { recursive: true });
+        fs.writeFileSync(resolve(__dirname, 'dist/client/client.css'), result.css, 'utf8');
+        console.error('[revelt] built CSS with Tailwind v4 → dist/client/client.css');
+    } catch (err) {
+        console.error('[revelt] failed to compile CSS:', err.message);
+    }
+}
+
+// Auto-inject styles & scripts into index.html based on actual dist/client/ files
+function injectAssets() {
+    const staticPrefix = config.static_prefix ?? '/static/';
+    const scripts = [];
+    const styles = [];
+
+    const clientDist = resolve(__dirname, 'dist/client');
+    if (fs.existsSync(clientDist)) {
+        const files = fs.readdirSync(clientDist);
+        for (const file of files) {
+            if (file.endsWith('.js')) {
+                scripts.push(`<script src="${staticPrefix}${file}" defer></script>`);
+            } else if (file.endsWith('.css')) {
+                styles.push(`<link rel="stylesheet" href="${staticPrefix}${file}">`);
+            }
+        }
+    }
+
+    const templatePath = resolve(__dirname, 'index.html');
+    if (!fs.existsSync(templatePath)) return;
+
+    let html = fs.readFileSync(templatePath, 'utf8');
+
+    // Remove duplicates
+    html = html.replace(/<link rel="stylesheet" href="[^"]+">/g, '');
+    html = html.replace(/<script src="[^"]+" defer><\/script>/g, '');
+
+    if (styles.length > 0) {
+        html = html.replace('</head>', '    ' + styles.join('\n    ') + '\n</head>');
+    }
+    if (scripts.length > 0) {
+        html = html.replace('</body>', '    ' + scripts.join('\n    ') + '\n</body>');
+    }
+
+    const outPath = resolve(clientDist, 'index.html');
+    fs.mkdirSync(dirname(outPath), { recursive: true });
+    fs.writeFileSync(outPath, html, 'utf8');
+
+    console.error(`[revelt] injected assets into ${outPath}`);
+}
+
 if (watchMode) {
     const serverCtx = await esbuild.context(serverBuildOptions);
-    const clientCtx = await esbuild.context(clientBuildOptions);
+    const clientCtx = await esbuild.context({
+        ...clientBuildOptions,
+        plugins: [
+            ...clientBuildOptions.plugins,
+            {
+                name: 'html-inject-plugin',
+                setup(build) {
+                    build.onEnd(async () => {
+                        await buildCSS();
+                        injectAssets();
+                    });
+                }
+            }
+        ]
+    });
     await serverCtx.watch();
     await clientCtx.watch();
     console.error('[revelt] watching frontend files for changes...');
@@ -177,5 +257,7 @@ if (watchMode) {
     if (serverResult.errors.length > 0 || clientResult.errors.length > 0) {
         process.exit(1);
     }
+    await buildCSS();
+    injectAssets();
     console.error('[revelt] built → dist/render-server.cjs and dist/client/client.js');
 }

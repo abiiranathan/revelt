@@ -9,7 +9,10 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "allowJs": true
+    "allowJs": true,
+    "paths": {
+        "@/*": ["./src/*"]
+    },
   },
   "include": [
     "build.mjs",
