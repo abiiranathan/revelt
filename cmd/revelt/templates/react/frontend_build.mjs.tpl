@@ -59,18 +59,12 @@ function discoverComponents() {
         });
 }
 
-const components = discoverComponents();
-
+// Log the initial discovery once at startup for orientation; the plugin
+// re-discovers on every rebuild so this count may drift during watch mode.
+const initialComponents = discoverComponents();
 console.error(
-    `[revelt] discovered ${components.length} component(s): ` +
-    components.map((c) => `${c.name}(${c.mode})`).join(', ')
-);
-
-const serverComponents = components.filter(
-    (c) => c.mode === 'ssr' || c.mode === 'hydrate'
-);
-const clientComponents = components.filter(
-    (c) => c.mode === 'hydrate' || c.mode === 'client'
+    `[revelt] discovered ${initialComponents.length} component(s): ` +
+    initialComponents.map((c) => `${c.name}(${c.mode})`).join(', ')
 );
 
 const watchMode = process.argv.includes('--watch');
@@ -86,12 +80,12 @@ const serverBuildOptions = {
     jsx: 'automatic',
     resolveExtensions: ['.tsx', '.ts', '.jsx', '.js', '.json'],
     alias: {
-        '@': resolve(__dirname, 'src'), 
+        '@': resolve(__dirname, 'src'),
     },
     sourcemap: watchMode ? 'inline' : false,
     logOverride: { 'ignored-bare-import': 'silent' },
     external: ['react', 'react-dom', 'react-dom/server'],
-    plugins: [componentRegistryPlugin(serverComponents)],
+    plugins: [componentRegistryPlugin('server')],
 };
 
 /** @type {esbuild.BuildOptions} */
@@ -109,18 +103,28 @@ const clientBuildOptions = {
     },
     sourcemap: watchMode ? 'inline' : false,
     logOverride: { 'ignored-bare-import': 'silent' },
-    plugins: [componentRegistryPlugin(clientComponents)],
+    plugins: [componentRegistryPlugin('client')],
     minify: !watchMode,
 };
 
 /**
  * esbuild plugin that provides a virtual `revelt:registry` module whose
- * contents are generated from the supplied component list.
+ * contents are regenerated on every build/rebuild from the live component
+ * list. Component discovery is deferred to `onLoad` so that watch-mode
+ * rebuilds always reflect the current state of the component directory.
  *
- * @param {{ name: string, path: string, mode: ComponentMode }[]} comps
+ * `watchFiles` registers each discovered component as a tracked dependency
+ * so esbuild invalidates the virtual module when any of them are edited
+ * (including `@mode` annotation changes). `watchDirs` catches additions and
+ * deletions that would not appear in the previous file list.
+ *
+ * @param {'server' | 'client'} side
+ *   Controls which component modes are included in the registry:
+ *   - `'server'`: `ssr` and `hydrate` components.
+ *   - `'client'`: `hydrate` and `client` components.
  * @returns {import('esbuild').Plugin}
  */
-function componentRegistryPlugin(comps) {
+function componentRegistryPlugin(side) {
     const registryPath = 'revelt:registry';
 
     return {
@@ -132,11 +136,23 @@ function componentRegistryPlugin(comps) {
             }));
 
             build.onLoad({ filter: /.*/, namespace: 'revelt-registry' }, () => {
+                // Re-discover on every build so additions, deletions, and
+                // @mode annotation changes are reflected without restarting.
+                const all = discoverComponents();
+                const comps = all.filter((c) =>
+                    side === 'server'
+                        ? c.mode === 'ssr' || c.mode === 'hydrate'
+                        : c.mode === 'hydrate' || c.mode === 'client'
+                );
+
                 if (comps.length === 0) {
                     return {
                         contents: 'export const COMPONENT_REGISTRY = new Map();',
                         loader: 'js',
                         resolveDir: __dirname,
+                        // Watch the directory so that adding the first component
+                        // still triggers a rebuild even with an empty file list.
+                        watchDirs: [componentDir],
                     };
                 }
 
@@ -163,13 +179,19 @@ function componentRegistryPlugin(comps) {
                         '\n]);',
                     loader: 'js',
                     resolveDir: __dirname,
+                    // Tell esbuild to watch every currently-known component file
+                    // so that content edits and @mode annotation changes trigger
+                    // a rebuild of the virtual registry module.
+                    watchFiles: comps.map((c) => resolve(__dirname, c.path)),
+                    // Watch the directory itself to catch additions and deletions.
+                    watchDirs: [componentDir],
                 };
             });
         },
     };
 }
 
-// PostCSS Processor compiled separately to maintain an esbuild dependency-free core
+// PostCSS processor compiled separately to maintain an esbuild dependency-free core.
 async function buildCSS() {
     const cssInput = resolve(__dirname, 'src/app.css');
     if (!fs.existsSync(cssInput)) return;
@@ -190,7 +212,7 @@ async function buildCSS() {
     }
 }
 
-// Auto-inject styles & scripts into index.html based on actual dist/client/ files
+// Auto-inject styles & scripts into index.html based on actual dist/client/ files.
 function injectAssets() {
     const staticPrefix = config.static_prefix ?? '/static/';
     const scripts = [];
@@ -213,7 +235,7 @@ function injectAssets() {
 
     let html = fs.readFileSync(templatePath, 'utf8');
 
-    // Remove duplicates
+    // Remove any previously injected tags to avoid duplicates across rebuilds.
     html = html.replace(/<link rel="stylesheet" href="[^"]+">/g, '');
     html = html.replace(/<script src="[^"]+" defer><\/script>/g, '');
 
@@ -244,9 +266,9 @@ if (watchMode) {
                         await buildCSS();
                         injectAssets();
                     });
-                }
-            }
-        ]
+                },
+            },
+        ],
     });
     await serverCtx.watch();
     await clientCtx.watch();

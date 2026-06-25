@@ -58,40 +58,65 @@ function discoverComponents() {
         });
 }
 
-const components = discoverComponents();
-
+// Log the initial discovery once at startup for orientation; the plugin
+// re-discovers on every load call so this count may drift during watch mode.
+const initialComponents = discoverComponents();
 console.error(
-    `[revelt] discovered ${components.length} component(s): ` +
-    components.map((c) => `${c.name}(${c.mode})`).join(', ')
-);
-
-const serverComponents = components.filter(
-    (c) => c.mode === 'ssr' || c.mode === 'hydrate'
-);
-const clientComponents = components.filter(
-    (c) => c.mode === 'hydrate' || c.mode === 'client'
+    `[revelt] discovered ${initialComponents.length} component(s): ` +
+    initialComponents.map((c) => `${c.name}(${c.mode})`).join(', ')
 );
 
 const watchMode = process.argv.includes('--watch');
 
 /**
- * Vite plugin that provides a virtual `revelt:registry` module whose
- * contents are generated from the supplied component list.
+ * Vite plugin that provides a virtual `revelt:registry` module whose contents
+ * are regenerated on every load from the live component list. Component
+ * discovery is deferred to `load()` so that watch-mode rebuilds always reflect
+ * the current state of the component directory.
  *
- * @param {{ name: string, path: string, mode: ComponentMode }[]} comps
+ * `this.addWatchFile()` registers each discovered component and the directory
+ * itself as tracked dependencies. Rollup/Vite then invalidates this virtual
+ * module whenever any of those paths change, causing `load()` to re-run and
+ * producing an up-to-date registry without restarting the process.
+ *
+ * @param {'server' | 'client'} side
+ *   Controls which component modes are included in the registry:
+ *   - `'server'`: `ssr` and `hydrate` components.
+ *   - `'client'`: `hydrate` and `client` components.
  * @returns {import('vite').Plugin}
  */
-function componentRegistryPlugin(comps) {
+function componentRegistryPlugin(side) {
     const virtualId = 'revelt:registry';
-    const resolvedId = '\0SSRevelt:registry';
+    const resolvedId = '\0revelt:registry';
 
     return {
         name: 'revelt-component-registry',
+
         resolveId(id) {
             if (id === virtualId) return resolvedId;
         },
+
         load(id) {
             if (id !== resolvedId) return;
+
+            // Re-discover on every load call so additions, deletions, and
+            // @mode annotation changes are reflected without restarting.
+            const all = discoverComponents();
+            const comps = all.filter((c) =>
+                side === 'server'
+                    ? c.mode === 'ssr' || c.mode === 'hydrate'
+                    : c.mode === 'hydrate' || c.mode === 'client'
+            );
+
+            // Register each currently-known component as a watched dependency
+            // so Rollup invalidates this virtual module on content edits and
+            // @mode annotation changes.
+            for (const c of comps) {
+                this.addWatchFile(resolve(__dirname, c.path));
+            }
+            // Watch the directory itself to catch additions and deletions that
+            // would not appear in the previous file list.
+            this.addWatchFile(componentDir);
 
             if (comps.length === 0) {
                 return 'export const COMPONENT_REGISTRY = new Map();';
@@ -122,6 +147,7 @@ function componentRegistryPlugin(comps) {
     };
 }
 
+// Auto-inject styles & scripts into index.html based on actual dist/client/ files.
 function injectAssets() {
     const staticPrefix = config.static_prefix ?? '/static/';
     const scripts = [];
@@ -144,7 +170,7 @@ function injectAssets() {
 
     let html = fs.readFileSync(templatePath, 'utf8');
 
-    // Remove duplicates
+    // Remove any previously injected tags to avoid duplicates across rebuilds.
     html = html.replace(/<link rel="stylesheet" href="[^"]+">/g, '');
     html = html.replace(/<script src="[^"]+" defer><\/script>/g, '');
 
@@ -167,19 +193,19 @@ function htmlPlugin() {
         name: 'html-inject-plugin',
         closeBundle() {
             injectAssets();
-        }
+        },
     };
 }
 
 const clientPlugins = [
     svelte(),
-    componentRegistryPlugin(clientComponents),
+    componentRegistryPlugin('client'),
     htmlPlugin(),
 ];
 
 const serverPlugins = [
     svelte(),
-    componentRegistryPlugin(serverComponents),
+    componentRegistryPlugin('server'),
 ];
 
 const appCssPath = resolve(__dirname, 'src/app.css');
@@ -232,8 +258,6 @@ const clientConfig = {
         sourcemap: watchMode,
         outDir: 'dist/client',
         emptyOutDir: false,
-        // Force Vite to extract CSS into a standalone file instead of inlining it
-        // cssCodeSplit: true, 
         rollupOptions: {
             input: 'client.js',
             output: {
@@ -246,9 +270,28 @@ const clientConfig = {
 };
 
 if (watchMode) {
-    await build({ ...serverConfig, build: { ...serverConfig.build, watch: {} } });
-    await build({ ...clientConfig, build: { ...clientConfig.build, watch: {} } });
+    // build() with watch: {} returns a RollupWatcher. It must be held in a
+    // variable — if the reference is dropped the watcher is garbage-collected
+    // and the process exits immediately after the first build completes.
+    const serverWatcher = await build({
+        ...serverConfig,
+        build: { ...serverConfig.build, watch: {} },
+    });
+
+    const clientWatcher = await build({
+        ...clientConfig,
+        build: { ...clientConfig.build, watch: {} },
+    });
+
     console.error('[revelt] watching frontend files for changes...');
+
+    // Close both watchers on Ctrl-C so Rollup can flush any pending writes
+    // before the process exits, mirroring the esbuild ctx.dispose() pattern.
+    process.on('SIGINT', async () => {
+        await serverWatcher.close();
+        await clientWatcher.close();
+        process.exit(0);
+    });
 } else {
     await build(serverConfig);
     await build(clientConfig);

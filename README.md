@@ -76,7 +76,7 @@ go install github.com/abiiranathan/revelte/cmd/revelte@latest
 ### 1. Initialise a project
 
 ```bash
-revelte init --framework react
+revelte init --framework react --tailwind
 ```
 
 Available flags:
@@ -86,6 +86,7 @@ Available flags:
 --dir           target directory (default: .)
 --source-dir    frontend source directory name (default: frontend)
 --component-dir component subdirectory name (default: components)
+--tailwind      Configures tailwind 4
 ```
 
 ### 2. Install Node dependencies
@@ -122,6 +123,14 @@ npm run build:watch    # rebuild on every file save (development)
 ```bash
 cd .. && go run main.go
 ```
+
+Or better still run:
+
+```bash
+revelt dev
+```
+This handles automatic reload of the go project and the frontend code watcher
+(esbuild-for react or vite - svelte)
 
 ---
 
@@ -405,6 +414,9 @@ calls have returned.
 - Node.js 18+
 
 ---
+
+## Deployment
+Read more about deployment frome [here](./docs/deployment.md)
 
 ## License
 

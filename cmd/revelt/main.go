@@ -3,14 +3,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/abiiranathan/revelt/revelt"
 )
@@ -21,17 +24,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	subcommand := os.Args[1]
-
-	switch subcommand {
+	switch os.Args[1] {
 	case "init":
 		runInit()
 	case "build":
 		runBuildCmd()
 	case "dev":
 		runDevCmd()
+	case "version":
+		fmt.Println("revelt v0.1.0")
 	default:
-		fmt.Printf("Unknown subcommand: %s\n", subcommand)
+		fmt.Printf("Unknown subcommand: %s\n", os.Args[1])
 		printUsage()
 		os.Exit(1)
 	}
@@ -40,12 +43,12 @@ func main() {
 func printUsage() {
 	fmt.Println("Usage: revelt <command> [arguments]")
 	fmt.Println("\nCommands:")
-	fmt.Println("  init   Initialize a new revelt project")
-	fmt.Println("  build  Build frontend assets (server and client bundles)")
-	fmt.Println("  dev    Start the development environment (watcher + server)")
+	fmt.Println("  init     Initialize a new revelt project")
+	fmt.Println("  build    Build frontend assets (server and client bundles)")
+	fmt.Println("  dev      Start the development environment (watcher + auto-reloading server)")
+	fmt.Println("  version  Print the revelt version")
 }
 
-// cmd/revelt/main.go
 func runInit() {
 	initCmd := flag.NewFlagSet("init", flag.ExitOnError)
 	frameworkOpt := initCmd.String("framework", "react", "Framework to use: react or svelte")
@@ -96,55 +99,30 @@ func runInit() {
 		log.Fatalf("Error creating directory %s: %v\n", sourceDir, err)
 	}
 
-	// Create dist/client directory structure early and write a placeholder template
-	// to prevent compile-time go:embed path failures on new project setups.
+	// Create dist/client directory structure early and write a placeholder
+	// template to prevent compile-time go:embed path failures on fresh setups.
 	distClientDir := filepath.Join(targetDir, sourceDir, "dist", "client")
 	if err := os.MkdirAll(distClientDir, 0755); err != nil {
 		log.Fatalf("Error creating distribution folders: %v\n", err)
 	}
-	err := os.WriteFile(
-		filepath.Join(distClientDir, "index.html"),
-		IndexPageBytes,
-		0644,
-	)
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(distClientDir, "index.html"), IndexPageBytes, 0644); err != nil {
 		log.Fatalf("Error writing distribution index file: %s\n", err)
 	}
-
-	// index.html lives at the root of the source directory.
-	err = os.WriteFile(
-		filepath.Join(targetDir, sourceDir, "index.html"),
-		IndexPageBytes,
-		0644,
-	)
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(targetDir, sourceDir, "index.html"), IndexPageBytes, 0644); err != nil {
 		log.Fatalf("Error writing template index file: %s\n", err)
 	}
 
-	// Create Tailwind folders & files if enabled
 	if *tailwindOpt {
 		appCssDir := filepath.Join(targetDir, sourceDir, "src")
 		_ = os.MkdirAll(appCssDir, 0755)
-		err := os.WriteFile(
-			filepath.Join(appCssDir, "app.css"),
-			[]byte("@import \"tailwindcss\";\n"),
-			0644,
-		)
-		if err != nil {
+		if err := os.WriteFile(filepath.Join(appCssDir, "app.css"), []byte("@import \"tailwindcss\";\n"), 0644); err != nil {
 			log.Fatalf("Error writing app.css file: %s\n", err)
 		}
 		fmt.Println("  Created src/app.css with Tailwind CSS v4 directive")
 
-		// ONLY create postcss.config.js for React.
-		// vite has native support in svelte.
 		if framework == "react" {
 			postcssConfig := "export default {\n  plugins: {\n    '@tailwindcss/postcss': {},\n  },\n};\n"
-			err = os.WriteFile(
-				filepath.Join(targetDir, sourceDir, "postcss.config.js"),
-				[]byte(postcssConfig),
-				0644,
-			)
-			if err != nil {
+			if err := os.WriteFile(filepath.Join(targetDir, sourceDir, "postcss.config.js"), []byte(postcssConfig), 0644); err != nil {
 				log.Fatalf("Error writing postcss.config.js file: %s\n", err)
 			}
 			fmt.Println("  Created postcss.config.js for editor autocompletion & style loaders")
@@ -171,12 +149,12 @@ func runInit() {
 	}
 
 	fmt.Println("\nProject successfully initialized!")
-	fmt.Println("To get started, follow these commands:")
-	fmt.Printf("  cd %s/%s\n", targetDir, sourceDir)
-	fmt.Println("  npm install")
+	fmt.Println("Next steps:")
+	fmt.Printf("  cd %s && npm install\n", filepath.Join(targetDir, sourceDir))
 	fmt.Println("  npm run build")
-	fmt.Println("  cd ..")
-	fmt.Println("  go run main.go")
+	fmt.Println("  cd .. && go run main.go")
+	fmt.Println("\nOr for live development with auto-reload:")
+	fmt.Println("  revelt dev")
 }
 
 func runBuildCmd() {
@@ -186,7 +164,7 @@ func runBuildCmd() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Running build within configured source directory: %s\n", cfg.SourceDir)
+	fmt.Printf("Building frontend in %s…\n", cfg.SourceDir)
 	cmd := exec.Command("node", "build.mjs")
 	cmd.Dir = cfg.SourceDir
 	cmd.Stdout = os.Stdout
@@ -198,6 +176,9 @@ func runBuildCmd() {
 	}
 }
 
+// runDevCmd starts the Node.js watcher and a self-reloading Go server.
+// Both processes are tied to a shared context that is cancelled on SIGINT/SIGTERM,
+// ensuring clean shutdown of all child processes.
 func runDevCmd() {
 	cfg, err := revelt.LoadConfig("revelt.json")
 	if err != nil {
@@ -205,25 +186,14 @@ func runDevCmd() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Starting watcher within configured source directory: %s\n", cfg.SourceDir)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	watchCmd := exec.Command("node", "build.mjs", "--watch")
-	watchCmd.Dir = cfg.SourceDir
-	watchCmd.Stdout = os.Stdout
-	watchCmd.Stderr = os.Stderr
+	fmt.Println("[revelt] starting development environment…")
+	fmt.Printf("[revelt] frontend source: %s\n", cfg.SourceDir)
+	fmt.Println("[revelt] watching .go files for changes (Ctrl-C to stop)")
 
-	if err := watchCmd.Start(); err != nil {
-		fmt.Printf("Failed to start watch tool: %v\n", err)
-		os.Exit(1)
-	}
+	runDev(ctx, cfg.SourceDir)
 
-	goCmd := exec.Command("go", "run", "main.go")
-	goCmd.Stdout = os.Stdout
-	goCmd.Stderr = os.Stderr
-
-	if err := goCmd.Run(); err != nil {
-		fmt.Printf("Go application exited: %v\n", err)
-		_ = watchCmd.Process.Kill()
-		os.Exit(1)
-	}
+	fmt.Println("[revelt] development environment stopped.")
 }
