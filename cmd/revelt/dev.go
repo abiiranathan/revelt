@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -84,19 +85,24 @@ func (r *devRunner) runNodeWatcher(ctx context.Context) {
 	}
 }
 
-// runGoWithRestart watches .go files under the current directory and restarts
-// `go run .` whenever they change. Blocks until ctx is cancelled.
+// runGoWithRestart watches .go and config files, compiles, and restarts the Go process.
 func (r *devRunner) runGoWithRestart(ctx context.Context) {
 	var (
-		goProc  *exec.Cmd
-		procMu  sync.Mutex
-		restart = make(chan struct{}, 1)
+		cmd           *exec.Cmd
+		restart       = make(chan struct{}, 1)
+		processExited = make(chan error, 1)
+		binName       = "./revelt_bin"
 	)
+	if runtime.GOOS == "windows" {
+		binName = `.\revelt_bin.exe`
+	}
 
-	triggerRestart := func() {
-		select {
-		case restart <- struct{}{}:
-		default: // a restart is already queued
+	// Helper to cleanly kill and wait for the running process to stop.
+	killProcess := func() {
+		if cmd != nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			<-processExited
+			cmd = nil
 		}
 	}
 
@@ -106,82 +112,84 @@ func (r *devRunner) runGoWithRestart(ctx context.Context) {
 		ticker := time.NewTicker(goWatchInterval)
 		defer ticker.Stop()
 
+		var pendingRestart bool
+		var lastChange time.Time
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if changed, _ := hasGoFileChanged(".", mtimes); changed {
-					mtimes = collectMtimes(".")
-					triggerRestart()
+				if changed, current := hasGoFileChanged(".", mtimes); changed {
+					mtimes = current
+					pendingRestart = true
+					lastChange = time.Now()
+				}
+
+				if pendingRestart && time.Since(lastChange) >= goRestartDebounce {
+					select {
+					case restart <- struct{}{}:
+					default:
+					}
+					pendingRestart = false
 				}
 			}
 		}
 	}()
 
-	// Initial start.
-	triggerRestart()
-
-	debounce := time.NewTimer(0)
-	<-debounce.C // drain the immediately-firing timer
+	// Trigger initial compile and run.
+	select {
+	case restart <- struct{}{}:
+	default:
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			procMu.Lock()
-			if goProc != nil && goProc.Process != nil {
-				_ = goProc.Process.Kill()
-			}
-			procMu.Unlock()
+			killProcess()
+			_ = os.Remove(binName)
 			return
 
-		case <-restart:
-			// Debounce: if another change arrives within 300 ms, reset the timer.
-			debounce.Reset(goRestartDebounce)
-			// Drain any further buffered restart signals during the debounce window.
-		drainLoop:
-			for {
+		case err := <-processExited:
+			cmd = nil
+			if ctx.Err() == nil {
+				log.Printf("[revelt] go server exited (%v); restarting…", err)
+				time.Sleep(1 * time.Second)
 				select {
-				case <-restart:
-					debounce.Reset(goRestartDebounce)
-				case <-debounce.C:
-					break drainLoop
+				case restart <- struct{}{}:
+				default:
 				}
 			}
 
-			procMu.Lock()
-			if goProc != nil && goProc.Process != nil {
-				fmt.Println("[revelt] restarting Go server…")
-				_ = goProc.Process.Kill()
-				_ = goProc.Wait()
+		case <-restart:
+			killProcess()
+
+			fmt.Println("[revelt] compiling Go server…")
+			buildCmd := exec.CommandContext(ctx, "go", "build", "-o", binName, ".")
+			buildCmd.Stdout = os.Stdout
+			buildCmd.Stderr = os.Stderr
+			if err := buildCmd.Run(); err != nil {
+				log.Printf("[revelt] build failed: %v", err)
+				continue
 			}
 
-			cmd := exec.CommandContext(ctx, "go", r.goArgs...)
+			fmt.Println("[revelt] starting Go server…")
+			cmd = exec.Command(binName)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			if err := cmd.Start(); err != nil {
-				log.Printf("[revelt] go run failed: %v", err)
-				procMu.Unlock()
+				log.Printf("[revelt] failed to start Go server: %v", err)
 				continue
 			}
-			goProc = cmd
-			procMu.Unlock()
 
-			// Let the process run in the background; we don't Wait here because
-			// we kill it ourselves on the next restart signal or context cancel.
 			go func(c *exec.Cmd) {
-				if err := c.Wait(); err != nil && ctx.Err() == nil {
-					log.Printf("[revelt] go server exited: %v", err)
-					// Trigger a restart so a crash causes a re-run after the
-					// next file save.
-					triggerRestart()
-				}
+				processExited <- c.Wait()
 			}(cmd)
 		}
 	}
 }
 
-// collectMtimes returns a map of path → mtime for all .go files under root.
+// collectMtimes returns a map of path → mtime for all .go files and revelt.json under root.
 func collectMtimes(root string) map[string]time.Time {
 	mtimes := make(map[string]time.Time, 64)
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -191,36 +199,34 @@ func collectMtimes(root string) map[string]time.Time {
 
 		name := d.Name()
 
-		switch name {
-		case ".git", ".hg", ".svn",
-			".idea", ".vscode", ".cache", ".direnv",
-			"node_modules",
-			"dist", "build", "bin",
-			"tmp", "temp",
-			"vendor",
-			"coverage":
-			return filepath.SkipDir
+		if d.IsDir() {
+			if path == root {
+				return nil
+			}
+			// Skip hidden directories and common build/dependency folders
+			if strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			switch name {
+			case "node_modules", "dist", "build", "bin", "tmp", "temp", "vendor", "coverage":
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
-		if strings.HasPrefix(name, ".") {
-			return filepath.SkipDir
+		if filepath.Ext(path) == ".go" || name == "revelt.json" {
+			info, err := d.Info()
+			if err == nil {
+				mtimes[path] = info.ModTime()
+			}
 		}
-		if filepath.Ext(path) != ".go" {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		mtimes[path] = info.ModTime()
 		return nil
 	})
 	return mtimes
 }
 
 // hasGoFileChanged compares the current file mtimes under root against the
-// previously recorded snapshot. Returns true if any file was added, removed,
-// or modified.
+// previously recorded snapshot.
 func hasGoFileChanged(root string, prev map[string]time.Time) (bool, map[string]time.Time) {
 	current := collectMtimes(root)
 	if len(current) != len(prev) {

@@ -10,7 +10,7 @@
     "noEmit": true,
     "allowJs": true
   },
-  "include": ["build.mjs", "render-server.js", "**/*.ts", "components/**/*.svelte"],
+  "include": ["build.mjs", "render-server.js", "**/*.ts", "**/*.svelte"],
   "exclude": [
     "node_modules",
     "dist"

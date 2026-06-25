@@ -18,9 +18,6 @@ import (
 	"github.com/abiiranathan/revelt/revelt"
 )
 
-//go:embed frontend/dist/client/index.html
-var indexPage string
-
 const (
 	SSReveltConfig = "revelt.json"
 	SideCarScript  = "render-server.cjs"
@@ -63,6 +60,12 @@ func main() {
 			return
 		}
 
+		indexHTML, err := os.ReadFile(indexPagePath(cfg))
+		if err != nil {
+			http.Error(w, "index.html not found: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
 		header, err := renderer.Render(r.Context(), revelt.RenderInput{
 			Component: "Header",
 			Props: map[string]any{
@@ -98,7 +101,7 @@ func main() {
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		t, err := template.New("index").Parse(indexPage)
+		t, err := template.New("index").Parse(string(indexHTML))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

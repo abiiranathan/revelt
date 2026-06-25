@@ -152,7 +152,7 @@ func runInit() {
 	fmt.Println("Next steps:")
 	fmt.Printf("  cd %s && npm install\n", filepath.Join(targetDir, sourceDir))
 	fmt.Println("  npm run build")
-	fmt.Println("  cd .. && go run main.go")
+	fmt.Println("  cd .. && go mod tidy && go run main.go")
 	fmt.Println("\nOr for live development with auto-reload:")
 	fmt.Println("  revelt dev")
 }

@@ -1,5 +1,5 @@
 {
-  "framework": "react",
+  "framework": "svelte",
   "source_dir": "{{SOURCE_DIR}}",
   "out_dir": "{{SOURCE_DIR}}/dist",
   "workers": 4,
