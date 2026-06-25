@@ -8,7 +8,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const configPath = resolve(__dirname, '../revelt.json');
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
-const componentDirName = config.component_dir ?? 'components';
+const componentDirName = config.component_dir ?? 'src/components';
 const componentDir = resolve(__dirname, componentDirName);
 
 /** @typedef {'ssr' | 'hydrate' | 'client'} ComponentMode */
@@ -34,12 +34,6 @@ function readModeAnnotation(filePath) {
     return 'hydrate';
 }
 
-/**
- * Discovers all component files inside `componentDir` and returns metadata
- * for each one. Only files with recognised extensions are included.
- *
- * @returns {{ name: string, path: string, mode: ComponentMode }[]}
- */
 function discoverComponents() {
     if (!fs.existsSync(componentDir)) {
         console.error(`[revelt] component directory not found: ${componentDir}`);
@@ -59,8 +53,6 @@ function discoverComponents() {
         });
 }
 
-// Log the initial discovery once at startup for orientation; the plugin
-// re-discovers on every rebuild so this count may drift during watch mode.
 const initialComponents = discoverComponents();
 console.error(
     `[revelt] discovered ${initialComponents.length} component(s): ` +
@@ -77,7 +69,8 @@ const serverBuildOptions = {
     format: 'cjs',
     outfile: 'dist/render-server.cjs',
     target: 'node18',
-    jsx: 'automatic',
+    // Force Classic React Runtime to ensure strict single-instance matching
+    jsx: 'transform',
     resolveExtensions: ['.tsx', '.ts', '.jsx', '.js', '.json'],
     alias: {
         '@': resolve(__dirname, 'src'),
@@ -96,10 +89,13 @@ const clientBuildOptions = {
     format: 'iife',
     outfile: 'dist/client/client.js',
     target: 'es2020',
-    jsx: 'automatic',
+    // Force Classic React Runtime to resolve all rendering strictly to root React
+    jsx: 'transform',
     resolveExtensions: ['.tsx', '.ts', '.jsx', '.js', '.json'],
     alias: {
         '@': resolve(__dirname, 'src'),
+        'react': resolve(__dirname, 'node_modules/react'),
+        'react-dom': resolve(__dirname, 'node_modules/react-dom'),
     },
     sourcemap: watchMode ? 'inline' : false,
     logOverride: { 'ignored-bare-import': 'silent' },
@@ -107,23 +103,6 @@ const clientBuildOptions = {
     minify: !watchMode,
 };
 
-/**
- * esbuild plugin that provides a virtual `revelt:registry` module whose
- * contents are regenerated on every build/rebuild from the live component
- * list. Component discovery is deferred to `onLoad` so that watch-mode
- * rebuilds always reflect the current state of the component directory.
- *
- * `watchFiles` registers each discovered component as a tracked dependency
- * so esbuild invalidates the virtual module when any of them are edited
- * (including `@mode` annotation changes). `watchDirs` catches additions and
- * deletions that would not appear in the previous file list.
- *
- * @param {'server' | 'client'} side
- *   Controls which component modes are included in the registry:
- *   - `'server'`: `ssr` and `hydrate` components.
- *   - `'client'`: `hydrate` and `client` components.
- * @returns {import('esbuild').Plugin}
- */
 function componentRegistryPlugin(side) {
     const registryPath = 'revelt:registry';
 
@@ -150,8 +129,6 @@ function componentRegistryPlugin(side) {
                         contents: 'export const COMPONENT_REGISTRY = new Map();',
                         loader: 'js',
                         resolveDir: __dirname,
-                        // Watch the directory so that adding the first component
-                        // still triggers a rebuild even with an empty file list.
                         watchDirs: [componentDir],
                     };
                 }
@@ -179,11 +156,7 @@ function componentRegistryPlugin(side) {
                         '\n]);',
                     loader: 'js',
                     resolveDir: __dirname,
-                    // Tell esbuild to watch every currently-known component file
-                    // so that content edits and @mode annotation changes trigger
-                    // a rebuild of the virtual registry module.
                     watchFiles: comps.map((c) => resolve(__dirname, c.path)),
-                    // Watch the directory itself to catch additions and deletions.
                     watchDirs: [componentDir],
                 };
             });
@@ -191,7 +164,6 @@ function componentRegistryPlugin(side) {
     };
 }
 
-// PostCSS processor compiled separately to maintain an esbuild dependency-free core.
 async function buildCSS() {
     const cssInput = resolve(__dirname, 'src/app.css');
     if (!fs.existsSync(cssInput)) return;
@@ -212,7 +184,6 @@ async function buildCSS() {
     }
 }
 
-// Auto-inject styles & scripts into index.html based on actual dist/client/ files.
 function injectAssets() {
     const staticPrefix = config.static_prefix ?? '/static/';
     const scripts = [];
@@ -235,7 +206,6 @@ function injectAssets() {
 
     let html = fs.readFileSync(templatePath, 'utf8');
 
-    // Remove any previously injected tags to avoid duplicates across rebuilds.
     html = html.replace(/<link rel="stylesheet" href="[^"]+">/g, '');
     html = html.replace(/<script src="[^"]+" defer><\/script>/g, '');
 

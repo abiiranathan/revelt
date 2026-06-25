@@ -1,4 +1,4 @@
-import React from "react";
+import * as React from "react";
 import { hydrateRoot, createRoot } from "react-dom/client";
 import { COMPONENT_REGISTRY } from "revelt:registry";
 
@@ -24,7 +24,7 @@ function hydrateIslands() {
       }
     } else {
       console.warn(
-        '[revelt-client] Component "' + name + '" not found in registry.'
+        '[revelt-client] Component "' + name + '" not found in registry.',
       );
     }
   }

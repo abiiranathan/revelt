@@ -1,4 +1,4 @@
-import React from 'react';
+import * as React from 'react';
 import { renderToString } from 'react-dom/server';
 import { createInterface } from 'node:readline';
 import { COMPONENT_REGISTRY } from 'revelt:registry';
