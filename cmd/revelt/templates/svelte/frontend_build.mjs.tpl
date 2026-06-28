@@ -12,11 +12,11 @@ const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 const componentDirName = config.component_dir ?? 'components';
 const componentDir = resolve(__dirname, componentDirName);
 
-/** @typedef {'ssr' | 'hydrate' | 'client'} ComponentMode */
+/** @typedef {'ssr' | 'hydrate' | 'client' | 'lazy-client'} ComponentMode */
 
 /**
  * Reads the leading lines of a source file and extracts the declared
- * rendering mode from a `@mode <ssr|hydrate|client>` comment annotation.
+ * rendering mode from a `@mode <ssr|hydrate|client|lazy-client>` annotation.
  * Falls back to `'hydrate'` when no annotation is present.
  *
  * @param {string} filePath Absolute path to the component source file.
@@ -27,7 +27,8 @@ function readModeAnnotation(filePath) {
     const source = fs.readFileSync(filePath, 'utf8');
     const lines = source.split('\n', SEARCH_LINES);
     for (const line of lines) {
-        const m = line.match(/@mode\s+(ssr|hydrate|client)/);
+        // Match lazy-client before client so the longer token wins.
+        const m = line.match(/@mode\s+(lazy-client|ssr|hydrate|client)/);
         if (m) {
             return /** @type {ComponentMode} */ (m[1]);
         }
@@ -36,8 +37,7 @@ function readModeAnnotation(filePath) {
 }
 
 /**
- * Discovers all component files inside `componentDir` and returns metadata
- * for each one. Only .svelte files are included.
+ * Discovers all Svelte component files inside `componentDir`.
  *
  * @returns {{ name: string, path: string, mode: ComponentMode }[]}
  */
@@ -58,8 +58,6 @@ function discoverComponents() {
         });
 }
 
-// Log the initial discovery once at startup for orientation; the plugin
-// re-discovers on every load call so this count may drift during watch mode.
 const initialComponents = discoverComponents();
 console.error(
     `[revelt] discovered ${initialComponents.length} component(s): ` +
@@ -69,20 +67,15 @@ console.error(
 const watchMode = process.argv.includes('--watch');
 
 /**
- * Vite plugin that provides a virtual `revelt:registry` module whose contents
- * are regenerated on every load from the live component list. Component
- * discovery is deferred to `load()` so that watch-mode rebuilds always reflect
- * the current state of the component directory.
+ * Vite plugin that generates the `revelt:registry` virtual module.
  *
- * `this.addWatchFile()` registers each discovered component and the directory
- * itself as tracked dependencies. Rollup/Vite then invalidates this virtual
- * module whenever any of those paths change, causing `load()` to re-run and
- * producing an up-to-date registry without restarting the process.
+ * Component modes per side:
+ *
+ *   server  — 'ssr' and 'hydrate' only; static imports.
+ *   client  — 'hydrate' and 'client' as static imports;
+ *             'lazy-client' as a `load` thunk using dynamic import().
  *
  * @param {'server' | 'client'} side
- *   Controls which component modes are included in the registry:
- *   - `'server'`: `ssr` and `hydrate` components.
- *   - `'client'`: `hydrate` and `client` components.
  * @returns {import('vite').Plugin}
  */
 function componentRegistryPlugin(side) {
@@ -99,37 +92,66 @@ function componentRegistryPlugin(side) {
         load(id) {
             if (id !== resolvedId) return;
 
-            // Re-discover on every load call so additions, deletions, and
-            // @mode annotation changes are reflected without restarting.
             const all = discoverComponents();
-            const comps = all.filter((c) =>
-                side === 'server'
-                    ? c.mode === 'ssr' || c.mode === 'hydrate'
-                    : c.mode === 'hydrate' || c.mode === 'client'
-            );
 
-            // Register each currently-known component as a watched dependency
-            // so Rollup invalidates this virtual module on content edits and
-            // @mode annotation changes.
-            for (const c of comps) {
+            if (side === 'server') {
+                const comps = all.filter(
+                    (c) => c.mode === 'ssr' || c.mode === 'hydrate'
+                );
+
+                for (const c of comps) this.addWatchFile(resolve(__dirname, c.path));
+                this.addWatchFile(componentDir);
+
+                if (comps.length === 0) {
+                    return 'export const COMPONENT_REGISTRY = new Map();';
+                }
+
+                const imports = comps
+                    .map((c) =>
+                        'import _c' + c.name +
+                        ' from ' + JSON.stringify(resolve(__dirname, c.path)) + ';'
+                    )
+                    .join('\n');
+
+                const entries = comps
+                    .map((c) =>
+                        '  [' + JSON.stringify(c.name) +
+                        ', { Component: _c' + c.name +
+                        ', mode: ' + JSON.stringify(c.mode) + ' }],'
+                    )
+                    .join('\n');
+
+                return (
+                    imports +
+                    '\nexport const COMPONENT_REGISTRY = new Map([\n' +
+                    entries +
+                    '\n]);'
+                );
+            }
+
+            // Client side.
+            const eager = all.filter(
+                (c) => c.mode === 'hydrate' || c.mode === 'client'
+            );
+            const lazy = all.filter((c) => c.mode === 'lazy-client');
+
+            for (const c of [...eager, ...lazy]) {
                 this.addWatchFile(resolve(__dirname, c.path));
             }
-            // Watch the directory itself to catch additions and deletions that
-            // would not appear in the previous file list.
             this.addWatchFile(componentDir);
 
-            if (comps.length === 0) {
+            if (eager.length === 0 && lazy.length === 0) {
                 return 'export const COMPONENT_REGISTRY = new Map();';
             }
 
-            const imports = comps
+            const eagerImports = eager
                 .map((c) =>
                     'import _c' + c.name +
                     ' from ' + JSON.stringify(resolve(__dirname, c.path)) + ';'
                 )
                 .join('\n');
 
-            const entries = comps
+            const eagerEntries = eager
                 .map((c) =>
                     '  [' + JSON.stringify(c.name) +
                     ', { Component: _c' + c.name +
@@ -137,31 +159,77 @@ function componentRegistryPlugin(side) {
                 )
                 .join('\n');
 
+            // Lazy entries: dynamic import() so Rollup splits into a separate
+            // chunk that is fetched only when load() is first called.
+            const lazyEntries = lazy
+                .map((c) =>
+                    '  [' + JSON.stringify(c.name) +
+                    ', { load: () => import(' + JSON.stringify(resolve(__dirname, c.path)) + ')' +
+                    '.then((m) => m.default ?? m)' +
+                    ', mode: ' + JSON.stringify(c.mode) + ' }],'
+                )
+                .join('\n');
+
+            const allEntries = [eagerEntries, lazyEntries]
+                .filter(Boolean)
+                .join('\n');
+
             return (
-                imports +
+                eagerImports +
                 '\nexport const COMPONENT_REGISTRY = new Map([\n' +
-                entries +
+                allEntries +
                 '\n]);'
             );
         },
     };
 }
 
-// Auto-inject styles & scripts into index.html based on actual dist/client/ files.
 function injectAssets() {
     const staticPrefix = config.static_prefix ?? '/static/';
-    const scripts = [];
+    const moduleScripts = [];
+    const modulePreloads = [];
     const styles = [];
 
     const clientDist = resolve(__dirname, 'dist/client');
-    if (fs.existsSync(clientDist)) {
+    if (!fs.existsSync(clientDist)) return;
+
+    const manifestPath = resolve(clientDist, '.vite/manifest.json');
+    if (fs.existsSync(manifestPath)) {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        for (const entry of Object.values(manifest)) {
+            if (!entry.isEntry) continue;
+            
+            // Only inject the main entry file (starting with 'client'), skipping dynamic split chunks
+            const file = entry.file;
+            if (file.startsWith('client')) {
+                modulePreloads.push(
+                    `<link rel="modulepreload" href="${staticPrefix}${file}">`
+                );
+                moduleScripts.push(
+                    `<script type="module" src="${staticPrefix}${file}"></script>`
+                );
+            }
+        }
+    } else {
         const files = fs.readdirSync(clientDist);
         for (const file of files) {
-            if (file.endsWith('.js')) {
-                scripts.push(`<script src="${staticPrefix}${file}" defer></script>`);
-            } else if (file.endsWith('.css')) {
-                styles.push(`<link rel="stylesheet" href="${staticPrefix}${file}">`);
+            // Match main client entry file (e.g. client.js or client-hash.js), ignoring lazy route chunks
+            const isEntryFile = file === 'client.js' || /^client-[a-zA-Z0-9]+\.js$/.test(file);
+            if (isEntryFile) {
+                modulePreloads.push(
+                    `<link rel="modulepreload" href="${staticPrefix}${file}">`
+                );
+                moduleScripts.push(
+                    `<script type="module" src="${staticPrefix}${file}"></script>`
+                );
             }
+        }
+    }
+
+    const files = fs.readdirSync(clientDist);
+    for (const file of files) {
+        if (file.endsWith('.css')) {
+            styles.push(`<link rel="stylesheet" href="${staticPrefix}${file}">`);
         }
     }
 
@@ -170,15 +238,28 @@ function injectAssets() {
 
     let html = fs.readFileSync(templatePath, 'utf8');
 
-    // Remove any previously injected tags to avoid duplicates across rebuilds.
+    html = html.replace(/<link rel="modulepreload"[^>]+>/g, '');
     html = html.replace(/<link rel="stylesheet" href="[^"]+">/g, '');
+    html = html.replace(/<script type="module"[^>]*><\/script>/g, '');
     html = html.replace(/<script src="[^"]+" defer><\/script>/g, '');
 
-    if (styles.length > 0) {
-        html = html.replace('</head>', '    ' + styles.join('\n    ') + '\n</head>');
+    if (modulePreloads.length > 0) {
+        html = html.replace(
+            '</head>',
+            '    ' + modulePreloads.join('\n    ') + '\n</head>'
+        );
     }
-    if (scripts.length > 0) {
-        html = html.replace('</body>', '    ' + scripts.join('\n    ') + '\n</body>');
+    if (styles.length > 0) {
+        html = html.replace(
+            '</head>',
+            '    ' + styles.join('\n    ') + '\n</head>'
+        );
+    }
+    if (moduleScripts.length > 0) {
+        html = html.replace(
+            '</body>',
+            '    ' + moduleScripts.join('\n    ') + '\n</body>'
+        );
     }
 
     const outPath = resolve(clientDist, 'index.html');
@@ -187,6 +268,7 @@ function injectAssets() {
 
     console.error(`[revelt] injected assets into ${outPath}`);
 }
+
 
 function htmlPlugin() {
     return {
@@ -223,9 +305,7 @@ if (fs.existsSync(appCssPath)) {
 const serverConfig = {
     plugins: serverPlugins,
     resolve: {
-        alias: {
-            '@': resolve(__dirname, 'src'),
-        },
+        alias: { '@': resolve(__dirname, 'src') },
     },
     ssr: {
         noExternal: ['revelt:registry'],
@@ -249,35 +329,31 @@ const serverConfig = {
 const clientConfig = {
     plugins: clientPlugins,
     resolve: {
-        alias: {
-            '@': resolve(__dirname, 'src'),
-        },
+        alias: { '@': resolve(__dirname, 'src') },
     },
     build: {
         minify: !watchMode,
         sourcemap: watchMode,
         outDir: 'dist/client',
         emptyOutDir: false,
+        manifest: true,
         rollupOptions: {
             input: 'client.js',
             output: {
-                format: 'iife',
-                entryFileNames: 'client.js',
-                assetFileNames: '[name].[ext]',
+                format: 'es',
+                entryFileNames: '[name]-[hash].js',
+                chunkFileNames: 'chunks/[name]-[hash].js',
+                assetFileNames: '[name]-[hash].[ext]',
             },
         },
     },
 };
 
 if (watchMode) {
-    // build() with watch: {} returns a RollupWatcher. It must be held in a
-    // variable — if the reference is dropped the watcher is garbage-collected
-    // and the process exits immediately after the first build completes.
     const serverWatcher = await build({
         ...serverConfig,
         build: { ...serverConfig.build, watch: {} },
     });
-
     const clientWatcher = await build({
         ...clientConfig,
         build: { ...clientConfig.build, watch: {} },
@@ -285,8 +361,6 @@ if (watchMode) {
 
     console.error('[revelt] watching frontend files for changes...');
 
-    // Close both watchers on Ctrl-C so Rollup can flush any pending writes
-    // before the process exits, mirroring the esbuild ctx.dispose() pattern.
     process.on('SIGINT', async () => {
         await serverWatcher.close();
         await clientWatcher.close();
@@ -295,5 +369,5 @@ if (watchMode) {
 } else {
     await build(serverConfig);
     await build(clientConfig);
-    console.error('[revelt] built → dist/render-server.cjs and dist/client/client.js');
+    console.error('[revelt] built → dist/render-server.cjs and dist/client/');
 }

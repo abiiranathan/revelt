@@ -31,6 +31,8 @@ func main() {
 		runBuildCmd()
 	case "dev":
 		runDevCmd()
+	case "update":
+		runUpdateCmd()
 	case "version":
 		fmt.Println("revelt v0.1.0")
 	default:
@@ -46,6 +48,7 @@ func printUsage() {
 	fmt.Println("  init     Initialize a new revelt project")
 	fmt.Println("  build    Build frontend assets (server and client bundles)")
 	fmt.Println("  dev      Start the development environment (watcher + auto-reloading server)")
+	fmt.Println("  update   Update framework files (build.mjs, render-server.js, client entry)")
 	fmt.Println("  version  Print the revelt version")
 }
 
@@ -129,6 +132,15 @@ func runInit() {
 		}
 	}
 
+	// Purge stray React configs if Svelte is selected on re-initializations
+	if framework == "svelte" {
+		strayPostcss := filepath.Join(targetDir, sourceDir, "postcss.config.js")
+		if _, err := os.Stat(strayPostcss); err == nil {
+			_ = os.Remove(strayPostcss)
+			fmt.Println("  Cleaned up stray postcss.config.js for Svelte build compatibility")
+		}
+	}
+
 	var templates []FileTemplate
 	if framework == "react" {
 		templates = ReactTemplates(vars)
@@ -176,9 +188,6 @@ func runBuildCmd() {
 	}
 }
 
-// runDevCmd starts the Node.js watcher and a self-reloading Go server.
-// Both processes are tied to a shared context that is cancelled on SIGINT/SIGTERM,
-// ensuring clean shutdown of all child processes.
 func runDevCmd() {
 	cfg, err := revelt.LoadConfig("revelt.json")
 	if err != nil {
@@ -196,4 +205,115 @@ func runDevCmd() {
 	runDev(ctx, cfg.SourceDir)
 
 	fmt.Println("[revelt] development environment stopped.")
+}
+
+func runUpdateCmd() {
+	updateCmd := flag.NewFlagSet("update", flag.ExitOnError)
+	dryRun := updateCmd.Bool("dry-run", false, "Print files that would be updated without writing them")
+
+	if err := updateCmd.Parse(os.Args[2:]); err != nil {
+		log.Fatalf("Error parsing flags: %v\n", err)
+	}
+
+	cfg, err := revelt.LoadConfig("revelt.json")
+	if err != nil {
+		fmt.Printf("Error: failed to load configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	framework := strings.ToLower(cfg.Framework)
+	if framework != "react" && framework != "svelte" {
+		fmt.Printf("Error: unsupported framework %q in revelt.json (must be react or svelte)\n", cfg.Framework)
+		os.Exit(1)
+	}
+
+	// Dynamically check if the project uses Tailwind by verifying if app.css exists.
+	// This prevents updates from erasing the style import inside client.js.
+	tailwindCSSImport := ""
+	appCSSPath := filepath.Join(cfg.SourceDir, "src", "app.css")
+	if _, err := os.Stat(appCSSPath); err == nil {
+		tailwindCSSImport = "import './src/app.css';\n"
+	}
+
+	vars := map[string]string{
+		"SOURCE_DIR":          cfg.SourceDir,
+		"COMPONENT_DIR":       cfg.ComponentDir,
+		"TAILWIND":            "false",
+		"TAILWIND_DEPS":       "",
+		"TAILWIND_CSS_IMPORT": tailwindCSSImport,
+	}
+
+	type frameworkFiles struct {
+		templateKey string
+		outputPath  string
+	}
+
+	var targets []frameworkFiles
+	switch framework {
+	case "react":
+		targets = []frameworkFiles{
+			{
+				templateKey: "templates/react/frontend_build.mjs.tpl",
+				outputPath:  filepath.Join(cfg.SourceDir, "build.mjs"),
+			},
+			{
+				templateKey: "templates/react/frontend_render-server.js.tpl",
+				outputPath:  filepath.Join(cfg.SourceDir, "render-server.js"),
+			},
+			{
+				templateKey: "templates/react/frontend_client.tsx.tpl",
+				outputPath:  filepath.Join(cfg.SourceDir, "client.tsx"),
+			},
+		}
+	case "svelte":
+		targets = []frameworkFiles{
+			{
+				templateKey: "templates/svelte/frontend_build.mjs.tpl",
+				outputPath:  filepath.Join(cfg.SourceDir, "build.mjs"),
+			},
+			{
+				templateKey: "templates/svelte/frontend_render-server.js.tpl",
+				outputPath:  filepath.Join(cfg.SourceDir, "render-server.js"),
+			},
+			{
+				templateKey: "templates/svelte/frontend_client.js.tpl",
+				outputPath:  filepath.Join(cfg.SourceDir, "client.js"),
+			},
+		}
+	}
+
+	fs := reactTemplatesFS
+	if framework == "svelte" {
+		fs = svelteTemplatesFS
+	}
+
+	if *dryRun {
+		fmt.Println("[revelt] dry run — no files will be written")
+	} else {
+		fmt.Printf("[revelt] updating %s framework files in %s\n", framework, cfg.SourceDir)
+	}
+
+	for _, t := range targets {
+		rendered, err := renderTemplates(fs, map[string]string{t.templateKey: t.outputPath}, vars)
+		if err != nil {
+			log.Fatalf("Error rendering template %s: %v\n", t.templateKey, err)
+		}
+		file := rendered[0]
+
+		if *dryRun {
+			fmt.Printf("  would overwrite %s\n", file.Path)
+			continue
+		}
+
+		if err := os.WriteFile(file.Path, []byte(file.Content), 0644); err != nil {
+			log.Fatalf("Error writing %s: %v\n", file.Path, err)
+		}
+		fmt.Printf("  updated %s\n", file.Path)
+	}
+
+	if *dryRun {
+		fmt.Println("[revelt] dry run complete — rerun without --dry-run to apply changes")
+	} else {
+		fmt.Println("[revelt] update complete")
+	}
 }

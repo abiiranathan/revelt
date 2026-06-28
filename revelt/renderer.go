@@ -186,9 +186,19 @@ func runBuild(ctx context.Context, args []string, dir string) error {
 	return nil
 }
 
+// isClientOnly reports whether mode bypasses SSR entirely. Both ModeClient and
+// ModeLazyClient skip the Node round-trip; the distinction between them is
+// purely a client-side concern (eager vs deferred chunk fetch).
+func isClientOnly(mode string) bool {
+	return mode == ModeClient || mode == ModeLazyClient
+}
+
 // Render processes an execution request. If the component's execution mode is
-// "client", server-side execution is bypassed and Go generates the empty mount
-// container locally without a Node round-trip.
+// ModeClient or ModeLazyClient, server-side execution is bypassed and Go
+// generates the empty mount container locally without a Node round-trip.
+// The data-ssr-lazy attribute is set for lazy-client components so that the
+// client-side hydration runtime knows to defer the dynamic import until the
+// island is actually present in the DOM.
 func (r *Renderer) Render(ctx context.Context, in RenderInput) (RenderOutput, error) {
 	if in.Component == "" {
 		return RenderOutput{}, fmt.Errorf("revelt: Component must not be empty")
@@ -200,7 +210,7 @@ func (r *Renderer) Render(ctx context.Context, in RenderInput) (RenderOutput, er
 			return RenderOutput{}, fmt.Errorf("revelt: unknown component %q", in.Component)
 		}
 
-		if mode == ModeClient {
+		if isClientOnly(mode) {
 			var propsJSON []byte
 			if in.Props != nil {
 				var err error
@@ -213,10 +223,21 @@ func (r *Renderer) Render(ctx context.Context, in RenderInput) (RenderOutput, er
 			}
 
 			escapedProps := escapeHTML(string(propsJSON))
-			placeholder := fmt.Sprintf(
-				`<div data-ssr-island="%s" data-ssr-props="%s"></div>`,
-				in.Component, escapedProps,
-			)
+
+			var placeholder string
+			if mode == ModeLazyClient {
+				// data-ssr-lazy signals the client runtime to use a dynamic
+				// import rather than a pre-loaded module reference.
+				placeholder = fmt.Sprintf(
+					`<div data-ssr-island="%s" data-ssr-props="%s" data-ssr-lazy="true"></div>`,
+					in.Component, escapedProps,
+				)
+			} else {
+				placeholder = fmt.Sprintf(
+					`<div data-ssr-island="%s" data-ssr-props="%s"></div>`,
+					in.Component, escapedProps,
+				)
+			}
 			return RenderOutput{HTML: placeholder, Head: ""}, nil
 		}
 	}

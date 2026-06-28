@@ -147,3 +147,8 @@ func main() {
 		log.Printf("graceful shutdown failed: %v", err)
 	}
 }
+
+// indexPagePath returns the absolute path to the HTML template.
+func indexPagePath(cfg *revelt.ProjectConfig) string {
+    return filepath.Join(cfg.OutDir, ClientDir, "index.html")
+}
