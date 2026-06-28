@@ -36,8 +36,7 @@ function readModeAnnotation(filePath) {
 }
 
 /**
- * Discovers all component files inside `componentDir` and returns metadata
- * for each one. Only .svelte files are included.
+ * Discovers all Svelte component files inside `componentDir`.
  *
  * @returns {{ name: string, path: string, mode: ComponentMode }[]}
  */
@@ -58,8 +57,6 @@ function discoverComponents() {
         });
 }
 
-// Log the initial discovery once at startup for orientation; the plugin
-// re-discovers on every load call so this count may drift during watch mode.
 const initialComponents = discoverComponents();
 console.error(
     `[revelt] discovered ${initialComponents.length} component(s): ` +
@@ -70,19 +67,9 @@ const watchMode = process.argv.includes('--watch');
 
 /**
  * Vite plugin that provides a virtual `revelt:registry` module whose contents
- * are regenerated on every load from the live component list. Component
- * discovery is deferred to `load()` so that watch-mode rebuilds always reflect
- * the current state of the component directory.
- *
- * `this.addWatchFile()` registers each discovered component and the directory
- * itself as tracked dependencies. Rollup/Vite then invalidates this virtual
- * module whenever any of those paths change, causing `load()` to re-run and
- * producing an up-to-date registry without restarting the process.
+ * are regenerated on every load from the live component list.
  *
  * @param {'server' | 'client'} side
- *   Controls which component modes are included in the registry:
- *   - `'server'`: `ssr` and `hydrate` components.
- *   - `'client'`: `hydrate` and `client` components.
  * @returns {import('vite').Plugin}
  */
 function componentRegistryPlugin(side) {
@@ -99,8 +86,6 @@ function componentRegistryPlugin(side) {
         load(id) {
             if (id !== resolvedId) return;
 
-            // Re-discover on every load call so additions, deletions, and
-            // @mode annotation changes are reflected without restarting.
             const all = discoverComponents();
             const comps = all.filter((c) =>
                 side === 'server'
@@ -108,14 +93,9 @@ function componentRegistryPlugin(side) {
                     : c.mode === 'hydrate' || c.mode === 'client'
             );
 
-            // Register each currently-known component as a watched dependency
-            // so Rollup invalidates this virtual module on content edits and
-            // @mode annotation changes.
             for (const c of comps) {
                 this.addWatchFile(resolve(__dirname, c.path));
             }
-            // Watch the directory itself to catch additions and deletions that
-            // would not appear in the previous file list.
             this.addWatchFile(componentDir);
 
             if (comps.length === 0) {
@@ -147,21 +127,62 @@ function componentRegistryPlugin(side) {
     };
 }
 
-// Auto-inject styles & scripts into index.html based on actual dist/client/ files.
+/**
+ * Rewrites index.html to reference the current build outputs.
+ *
+ * Vite's build manifest (`generate: 'manifest'`) maps logical input names to
+ * hashed output filenames. We use it to find the entry chunk rather than
+ * scanning the output directory, which avoids accidentally picking up shared
+ * chunks or asset files.
+ *
+ * The entry is injected as `<script type="module">` — browsers defer ESM
+ * automatically, so no `defer` attribute is required. A `<link rel="modulepreload">`
+ * is also injected so the browser fetches the entry chunk in parallel with HTML
+ * parsing rather than waiting until the `<script>` tag is encountered.
+ */
 function injectAssets() {
     const staticPrefix = config.static_prefix ?? '/static/';
-    const scripts = [];
+    const moduleScripts = [];
+    const modulePreloads = [];
     const styles = [];
 
     const clientDist = resolve(__dirname, 'dist/client');
-    if (fs.existsSync(clientDist)) {
+    if (!fs.existsSync(clientDist)) return;
+
+    // Read Vite's manifest to identify the entry chunk by its `isEntry` flag.
+    // The manifest is emitted to dist/client/.vite/manifest.json.
+    const manifestPath = resolve(clientDist, '.vite/manifest.json');
+    if (fs.existsSync(manifestPath)) {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+        for (const entry of Object.values(manifest)) {
+            if (!entry.isEntry) continue;
+            modulePreloads.push(
+                `<link rel="modulepreload" href="${staticPrefix}${entry.file}">`
+            );
+            moduleScripts.push(
+                `<script type="module" src="${staticPrefix}${entry.file}"></script>`
+            );
+        }
+    } else {
+        // Fallback: scan top-level .js files (watch mode / manifest disabled).
         const files = fs.readdirSync(clientDist);
         for (const file of files) {
             if (file.endsWith('.js')) {
-                scripts.push(`<script src="${staticPrefix}${file}" defer></script>`);
-            } else if (file.endsWith('.css')) {
-                styles.push(`<link rel="stylesheet" href="${staticPrefix}${file}">`);
+                modulePreloads.push(
+                    `<link rel="modulepreload" href="${staticPrefix}${file}">`
+                );
+                moduleScripts.push(
+                    `<script type="module" src="${staticPrefix}${file}"></script>`
+                );
             }
+        }
+    }
+
+    // Collect CSS outputs.
+    const files = fs.readdirSync(clientDist);
+    for (const file of files) {
+        if (file.endsWith('.css')) {
+            styles.push(`<link rel="stylesheet" href="${staticPrefix}${file}">`);
         }
     }
 
@@ -170,15 +191,30 @@ function injectAssets() {
 
     let html = fs.readFileSync(templatePath, 'utf8');
 
-    // Remove any previously injected tags to avoid duplicates across rebuilds.
+    // Strip previously injected tags to prevent duplicates across rebuilds.
+    html = html.replace(/<link rel="modulepreload"[^>]+>/g, '');
     html = html.replace(/<link rel="stylesheet" href="[^"]+">/g, '');
+    html = html.replace(/<script type="module"[^>]*><\/script>/g, '');
+    // Remove legacy defer tags from projects built before this change.
     html = html.replace(/<script src="[^"]+" defer><\/script>/g, '');
 
-    if (styles.length > 0) {
-        html = html.replace('</head>', '    ' + styles.join('\n    ') + '\n</head>');
+    if (modulePreloads.length > 0) {
+        html = html.replace(
+            '</head>',
+            '    ' + modulePreloads.join('\n    ') + '\n</head>'
+        );
     }
-    if (scripts.length > 0) {
-        html = html.replace('</body>', '    ' + scripts.join('\n    ') + '\n</body>');
+    if (styles.length > 0) {
+        html = html.replace(
+            '</head>',
+            '    ' + styles.join('\n    ') + '\n</head>'
+        );
+    }
+    if (moduleScripts.length > 0) {
+        html = html.replace(
+            '</body>',
+            '    ' + moduleScripts.join('\n    ') + '\n</body>'
+        );
     }
 
     const outPath = resolve(clientDist, 'index.html');
@@ -245,6 +281,18 @@ const serverConfig = {
     },
 };
 
+// Client bundle: ESM format with Rollup code splitting.
+//
+// Vite/Rollup splits code at dynamic import() boundaries. Setting
+// `format: 'es'` and omitting a fixed `entryFileNames` lets Rollup add
+// content hashes so every chunk gets an immutable filename. The manifest
+// (`generate: 'manifest'`) lets injectAssets() look up the hashed entry
+// filename without directory scanning.
+//
+// Shared chunks are emitted automatically by Rollup whenever two or more
+// entry/dynamic-import chunks share a common dependency. They land alongside
+// the entry chunk in dist/client/ and are fetched by the browser as needed
+// when the entry module runs.
 /** @type {import('vite').UserConfig} */
 const clientConfig = {
     plugins: clientPlugins,
@@ -258,21 +306,23 @@ const clientConfig = {
         sourcemap: watchMode,
         outDir: 'dist/client',
         emptyOutDir: false,
+        // Emit the Vite manifest so injectAssets() can resolve hashed filenames.
+        manifest: true,
         rollupOptions: {
             input: 'client.js',
             output: {
-                format: 'iife',
-                entryFileNames: 'client.js',
-                assetFileNames: '[name].[ext]',
+                // ESM is required for native browser code splitting.
+                format: 'es',
+                // Content-hash entry and chunk filenames for immutable caching.
+                entryFileNames: '[name]-[hash].js',
+                chunkFileNames: 'chunks/[name]-[hash].js',
+                assetFileNames: '[name]-[hash].[ext]',
             },
         },
     },
 };
 
 if (watchMode) {
-    // build() with watch: {} returns a RollupWatcher. It must be held in a
-    // variable — if the reference is dropped the watcher is garbage-collected
-    // and the process exits immediately after the first build completes.
     const serverWatcher = await build({
         ...serverConfig,
         build: { ...serverConfig.build, watch: {} },
@@ -285,8 +335,6 @@ if (watchMode) {
 
     console.error('[revelt] watching frontend files for changes...');
 
-    // Close both watchers on Ctrl-C so Rollup can flush any pending writes
-    // before the process exits, mirroring the esbuild ctx.dispose() pattern.
     process.on('SIGINT', async () => {
         await serverWatcher.close();
         await clientWatcher.close();
@@ -295,5 +343,5 @@ if (watchMode) {
 } else {
     await build(serverConfig);
     await build(clientConfig);
-    console.error('[revelt] built → dist/render-server.cjs and dist/client/client.js');
+    console.error('[revelt] built → dist/render-server.cjs and dist/client/');
 }

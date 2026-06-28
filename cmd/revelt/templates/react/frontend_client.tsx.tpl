@@ -30,6 +30,10 @@ function hydrateIslands() {
   }
 }
 
+// ESM modules are deferred by the browser automatically — DOMContentLoaded
+// will always have fired before this module executes when loaded via
+// <script type="module">. The readyState guard is kept for completeness and
+// to handle the rare case of the script being injected dynamically.
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", hydrateIslands);
 } else {
