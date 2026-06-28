@@ -12,11 +12,11 @@ const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 const componentDirName = config.component_dir ?? 'components';
 const componentDir = resolve(__dirname, componentDirName);
 
-/** @typedef {'ssr' | 'hydrate' | 'client'} ComponentMode */
+/** @typedef {'ssr' | 'hydrate' | 'client' | 'lazy-client'} ComponentMode */
 
 /**
  * Reads the leading lines of a source file and extracts the declared
- * rendering mode from a `@mode <ssr|hydrate|client>` comment annotation.
+ * rendering mode from a `@mode <ssr|hydrate|client|lazy-client>` annotation.
  * Falls back to `'hydrate'` when no annotation is present.
  *
  * @param {string} filePath Absolute path to the component source file.
@@ -27,7 +27,8 @@ function readModeAnnotation(filePath) {
     const source = fs.readFileSync(filePath, 'utf8');
     const lines = source.split('\n', SEARCH_LINES);
     for (const line of lines) {
-        const m = line.match(/@mode\s+(ssr|hydrate|client)/);
+        // Match lazy-client before client so the longer token wins.
+        const m = line.match(/@mode\s+(lazy-client|ssr|hydrate|client)/);
         if (m) {
             return /** @type {ComponentMode} */ (m[1]);
         }
@@ -66,8 +67,13 @@ console.error(
 const watchMode = process.argv.includes('--watch');
 
 /**
- * Vite plugin that provides a virtual `revelt:registry` module whose contents
- * are regenerated on every load from the live component list.
+ * Vite plugin that generates the `revelt:registry` virtual module.
+ *
+ * Component modes per side:
+ *
+ *   server  — 'ssr' and 'hydrate' only; static imports.
+ *   client  — 'hydrate' and 'client' as static imports;
+ *             'lazy-client' as a `load` thunk using dynamic import().
  *
  * @param {'server' | 'client'} side
  * @returns {import('vite').Plugin}
@@ -87,29 +93,65 @@ function componentRegistryPlugin(side) {
             if (id !== resolvedId) return;
 
             const all = discoverComponents();
-            const comps = all.filter((c) =>
-                side === 'server'
-                    ? c.mode === 'ssr' || c.mode === 'hydrate'
-                    : c.mode === 'hydrate' || c.mode === 'client'
-            );
 
-            for (const c of comps) {
+            if (side === 'server') {
+                const comps = all.filter(
+                    (c) => c.mode === 'ssr' || c.mode === 'hydrate'
+                );
+
+                for (const c of comps) this.addWatchFile(resolve(__dirname, c.path));
+                this.addWatchFile(componentDir);
+
+                if (comps.length === 0) {
+                    return 'export const COMPONENT_REGISTRY = new Map();';
+                }
+
+                const imports = comps
+                    .map((c) =>
+                        'import _c' + c.name +
+                        ' from ' + JSON.stringify(resolve(__dirname, c.path)) + ';'
+                    )
+                    .join('\n');
+
+                const entries = comps
+                    .map((c) =>
+                        '  [' + JSON.stringify(c.name) +
+                        ', { Component: _c' + c.name +
+                        ', mode: ' + JSON.stringify(c.mode) + ' }],'
+                    )
+                    .join('\n');
+
+                return (
+                    imports +
+                    '\nexport const COMPONENT_REGISTRY = new Map([\n' +
+                    entries +
+                    '\n]);'
+                );
+            }
+
+            // Client side.
+            const eager = all.filter(
+                (c) => c.mode === 'hydrate' || c.mode === 'client'
+            );
+            const lazy = all.filter((c) => c.mode === 'lazy-client');
+
+            for (const c of [...eager, ...lazy]) {
                 this.addWatchFile(resolve(__dirname, c.path));
             }
             this.addWatchFile(componentDir);
 
-            if (comps.length === 0) {
+            if (eager.length === 0 && lazy.length === 0) {
                 return 'export const COMPONENT_REGISTRY = new Map();';
             }
 
-            const imports = comps
+            const eagerImports = eager
                 .map((c) =>
                     'import _c' + c.name +
                     ' from ' + JSON.stringify(resolve(__dirname, c.path)) + ';'
                 )
                 .join('\n');
 
-            const entries = comps
+            const eagerEntries = eager
                 .map((c) =>
                     '  [' + JSON.stringify(c.name) +
                     ', { Component: _c' + c.name +
@@ -117,29 +159,31 @@ function componentRegistryPlugin(side) {
                 )
                 .join('\n');
 
+            // Lazy entries: dynamic import() so Rollup splits into a separate
+            // chunk that is fetched only when load() is first called.
+            const lazyEntries = lazy
+                .map((c) =>
+                    '  [' + JSON.stringify(c.name) +
+                    ', { load: () => import(' + JSON.stringify(resolve(__dirname, c.path)) + ')' +
+                    '.then((m) => m.default ?? m)' +
+                    ', mode: ' + JSON.stringify(c.mode) + ' }],'
+                )
+                .join('\n');
+
+            const allEntries = [eagerEntries, lazyEntries]
+                .filter(Boolean)
+                .join('\n');
+
             return (
-                imports +
+                eagerImports +
                 '\nexport const COMPONENT_REGISTRY = new Map([\n' +
-                entries +
+                allEntries +
                 '\n]);'
             );
         },
     };
 }
 
-/**
- * Rewrites index.html to reference the current build outputs.
- *
- * Vite's build manifest (`generate: 'manifest'`) maps logical input names to
- * hashed output filenames. We use it to find the entry chunk rather than
- * scanning the output directory, which avoids accidentally picking up shared
- * chunks or asset files.
- *
- * The entry is injected as `<script type="module">` — browsers defer ESM
- * automatically, so no `defer` attribute is required. A `<link rel="modulepreload">`
- * is also injected so the browser fetches the entry chunk in parallel with HTML
- * parsing rather than waiting until the `<script>` tag is encountered.
- */
 function injectAssets() {
     const staticPrefix = config.static_prefix ?? '/static/';
     const moduleScripts = [];
@@ -149,25 +193,29 @@ function injectAssets() {
     const clientDist = resolve(__dirname, 'dist/client');
     if (!fs.existsSync(clientDist)) return;
 
-    // Read Vite's manifest to identify the entry chunk by its `isEntry` flag.
-    // The manifest is emitted to dist/client/.vite/manifest.json.
     const manifestPath = resolve(clientDist, '.vite/manifest.json');
     if (fs.existsSync(manifestPath)) {
         const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
         for (const entry of Object.values(manifest)) {
             if (!entry.isEntry) continue;
-            modulePreloads.push(
-                `<link rel="modulepreload" href="${staticPrefix}${entry.file}">`
-            );
-            moduleScripts.push(
-                `<script type="module" src="${staticPrefix}${entry.file}"></script>`
-            );
+            
+            // Only inject the main entry file (starting with 'client'), skipping dynamic split chunks
+            const file = entry.file;
+            if (file.startsWith('client')) {
+                modulePreloads.push(
+                    `<link rel="modulepreload" href="${staticPrefix}${file}">`
+                );
+                moduleScripts.push(
+                    `<script type="module" src="${staticPrefix}${file}"></script>`
+                );
+            }
         }
     } else {
-        // Fallback: scan top-level .js files (watch mode / manifest disabled).
         const files = fs.readdirSync(clientDist);
         for (const file of files) {
-            if (file.endsWith('.js')) {
+            // Match main client entry file (e.g. client.js or client-hash.js), ignoring lazy route chunks
+            const isEntryFile = file === 'client.js' || /^client-[a-zA-Z0-9]+\.js$/.test(file);
+            if (isEntryFile) {
                 modulePreloads.push(
                     `<link rel="modulepreload" href="${staticPrefix}${file}">`
                 );
@@ -178,7 +226,6 @@ function injectAssets() {
         }
     }
 
-    // Collect CSS outputs.
     const files = fs.readdirSync(clientDist);
     for (const file of files) {
         if (file.endsWith('.css')) {
@@ -191,11 +238,9 @@ function injectAssets() {
 
     let html = fs.readFileSync(templatePath, 'utf8');
 
-    // Strip previously injected tags to prevent duplicates across rebuilds.
     html = html.replace(/<link rel="modulepreload"[^>]+>/g, '');
     html = html.replace(/<link rel="stylesheet" href="[^"]+">/g, '');
     html = html.replace(/<script type="module"[^>]*><\/script>/g, '');
-    // Remove legacy defer tags from projects built before this change.
     html = html.replace(/<script src="[^"]+" defer><\/script>/g, '');
 
     if (modulePreloads.length > 0) {
@@ -223,6 +268,7 @@ function injectAssets() {
 
     console.error(`[revelt] injected assets into ${outPath}`);
 }
+
 
 function htmlPlugin() {
     return {
@@ -259,9 +305,7 @@ if (fs.existsSync(appCssPath)) {
 const serverConfig = {
     plugins: serverPlugins,
     resolve: {
-        alias: {
-            '@': resolve(__dirname, 'src'),
-        },
+        alias: { '@': resolve(__dirname, 'src') },
     },
     ssr: {
         noExternal: ['revelt:registry'],
@@ -281,39 +325,22 @@ const serverConfig = {
     },
 };
 
-// Client bundle: ESM format with Rollup code splitting.
-//
-// Vite/Rollup splits code at dynamic import() boundaries. Setting
-// `format: 'es'` and omitting a fixed `entryFileNames` lets Rollup add
-// content hashes so every chunk gets an immutable filename. The manifest
-// (`generate: 'manifest'`) lets injectAssets() look up the hashed entry
-// filename without directory scanning.
-//
-// Shared chunks are emitted automatically by Rollup whenever two or more
-// entry/dynamic-import chunks share a common dependency. They land alongside
-// the entry chunk in dist/client/ and are fetched by the browser as needed
-// when the entry module runs.
 /** @type {import('vite').UserConfig} */
 const clientConfig = {
     plugins: clientPlugins,
     resolve: {
-        alias: {
-            '@': resolve(__dirname, 'src'),
-        },
+        alias: { '@': resolve(__dirname, 'src') },
     },
     build: {
         minify: !watchMode,
         sourcemap: watchMode,
         outDir: 'dist/client',
         emptyOutDir: false,
-        // Emit the Vite manifest so injectAssets() can resolve hashed filenames.
         manifest: true,
         rollupOptions: {
             input: 'client.js',
             output: {
-                // ESM is required for native browser code splitting.
                 format: 'es',
-                // Content-hash entry and chunk filenames for immutable caching.
                 entryFileNames: '[name]-[hash].js',
                 chunkFileNames: 'chunks/[name]-[hash].js',
                 assetFileNames: '[name]-[hash].[ext]',
@@ -327,7 +354,6 @@ if (watchMode) {
         ...serverConfig,
         build: { ...serverConfig.build, watch: {} },
     });
-
     const clientWatcher = await build({
         ...clientConfig,
         build: { ...clientConfig.build, watch: {} },

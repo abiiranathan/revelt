@@ -25,6 +25,14 @@ const (
 	// ModeClient indicates a component is rendered only on the client.
 	// Node SSR is bypassed entirely; the server sends an empty mount container.
 	ModeClient = "client"
+
+	// ModeLazyClient indicates a component is rendered only on the client,
+	// and its JavaScript chunk is fetched lazily on first use rather than
+	// eagerly at page load. Node SSR is bypassed in the same way as ModeClient.
+	// Use this for heavy components that are only reachable via navigation
+	// (e.g. a chart on a secondary route) to avoid paying their download cost
+	// on every page load.
+	ModeLazyClient = "lazy-client"
 )
 
 // componentExtensions lists the file extensions recognised as component sources.
@@ -148,7 +156,7 @@ func discoverComponentModes(sourceDir, componentDir string) (map[string]string, 
 }
 
 // readModeAnnotation scans the first few lines of a component source file for
-// a @mode <ssr|hydrate|client> annotation. Returns ModeHydrate when absent.
+// a @mode <ssr|hydrate|client|lazy-client> annotation. Returns ModeHydrate when absent.
 func readModeAnnotation(path string) (string, error) {
 	const searchLines = 5
 
@@ -174,6 +182,8 @@ func readModeAnnotation(path string) (string, error) {
 
 // extractMode parses a single source line for a @mode annotation.
 // Returns the mode string and true when a valid annotation is found.
+// ModeLazyClient ("lazy-client") must be tested before ModeClient ("client")
+// because ModeClient is a prefix of ModeLazyClient.
 func extractMode(line string) (string, bool) {
 	idx := strings.Index(line, "@mode")
 	if idx == -1 {
@@ -186,6 +196,12 @@ func extractMode(line string) (string, bool) {
 		return ModeSSR, true
 	case strings.HasPrefix(rest, ModeHydrate):
 		return ModeHydrate, true
+	// ModeLazyClient must be checked before ModeClient: "lazy-client" starts
+	// with neither "client" nor a unique prefix, but "client" IS a prefix of
+	// "lazy-client" only when read in reverse — actually they are distinct
+	// prefixes. Regardless, checking the longer token first is defensive.
+	case strings.HasPrefix(rest, ModeLazyClient):
+		return ModeLazyClient, true
 	case strings.HasPrefix(rest, ModeClient):
 		return ModeClient, true
 	default:

@@ -26,7 +26,8 @@ function readModeAnnotation(filePath) {
     const source = fs.readFileSync(filePath, 'utf8');
     const lines = source.split('\n', SEARCH_LINES);
     for (const line of lines) {
-        const m = line.match(/@mode\s+(ssr|hydrate|client)/);
+        // Match lazy-client before client so the longer token wins.
+        const m = line.match(/@mode\s+(lazy-client|ssr|hydrate|client)/);
         if (m) {
             return /** @type {ComponentMode} */ (m[1]);
         }
@@ -129,13 +130,11 @@ function componentRegistryPlugin(side) {
             }));
 
             build.onLoad({ filter: /.*/, namespace: 'revelt-registry' }, () => {
-                // Re-discover on every build so additions, deletions, and
-                // @mode annotation changes are reflected without restarting.
                 const all = discoverComponents();
                 const comps = all.filter((c) =>
                     side === 'server'
                         ? c.mode === 'ssr' || c.mode === 'hydrate'
-                        : c.mode === 'hydrate' || c.mode === 'client'
+                        : c.mode === 'hydrate' || c.mode === 'client' || c.mode === 'lazy-client'
                 );
 
                 if (comps.length === 0) {
@@ -147,14 +146,47 @@ function componentRegistryPlugin(side) {
                     };
                 }
 
-                const imports = comps
+                if (side === 'server') {
+                    const imports = comps
+                        .map((c) =>
+                            'import * as _c' + c.name +
+                            ' from ' + JSON.stringify(resolve(__dirname, c.path)) + ';'
+                        )
+                        .join('\n');
+
+                    const entries = comps
+                        .map((c) =>
+                            '  [' + JSON.stringify(c.name) +
+                            ', { Component: _c' + c.name + '.default ?? _c' + c.name +
+                            ', mode: ' + JSON.stringify(c.mode) + ' }],'
+                        )
+                        .join('\n');
+
+                    return {
+                        contents:
+                            imports +
+                            '\nexport const COMPONENT_REGISTRY = new Map([\n' +
+                            entries +
+                            '\n]);',
+                        loader: 'js',
+                        resolveDir: __dirname,
+                        watchFiles: comps.map((c) => resolve(__dirname, c.path)),
+                        watchDirs: [componentDir],
+                    };
+                }
+
+                // Client side: Dynamic route splitting for lazy components
+                const eager = comps.filter((c) => c.mode !== 'lazy-client');
+                const lazy = comps.filter((c) => c.mode === 'lazy-client');
+
+                const eagerImports = eager
                     .map((c) =>
                         'import * as _c' + c.name +
                         ' from ' + JSON.stringify(resolve(__dirname, c.path)) + ';'
                     )
                     .join('\n');
 
-                const entries = comps
+                const eagerEntries = eager
                     .map((c) =>
                         '  [' + JSON.stringify(c.name) +
                         ', { Component: _c' + c.name + '.default ?? _c' + c.name +
@@ -162,11 +194,22 @@ function componentRegistryPlugin(side) {
                     )
                     .join('\n');
 
+                const lazyEntries = lazy
+                    .map((c) =>
+                        '  [' + JSON.stringify(c.name) +
+                        ', { load: () => import(' + JSON.stringify(resolve(__dirname, c.path)) + ')' +
+                        '.then((m) => m.default ?? m)' +
+                        ', mode: ' + JSON.stringify(c.mode) + ' }],'
+                    )
+                    .join('\n');
+
+                const allEntries = [eagerEntries, lazyEntries].filter(Boolean).join('\n');
+
                 return {
                     contents:
-                        imports +
+                        eagerImports +
                         '\nexport const COMPONENT_REGISTRY = new Map([\n' +
-                        entries +
+                        allEntries +
                         '\n]);',
                     loader: 'js',
                     resolveDir: __dirname,
@@ -224,27 +267,25 @@ function injectAssets(metafile) {
     if (!fs.existsSync(clientDist)) return;
 
     if (metafile) {
-        // The metafile outputs map is keyed by output path relative to the
-        // build root. We want only the entry chunk (not shared chunks), which
-        // is identified by having a non-empty `entryPoint` field.
+        // When using metafile, only target outputs originating from the client entry point
         for (const [outPath, meta] of Object.entries(metafile.outputs)) {
             if (!meta.entryPoint) continue;
-            // outPath is relative to the process cwd (the frontend dir).
             const file = outPath.replace(/^dist\/client\//, '');
-            modulePreloads.push(
-                `<link rel="modulepreload" href="${staticPrefix}${file}">`
-            );
-            moduleScripts.push(
-                `<script type="module" src="${staticPrefix}${file}"></script>`
-            );
+            if (file.startsWith('client')) {
+                modulePreloads.push(
+                    `<link rel="modulepreload" href="${staticPrefix}${file}">`
+                );
+                moduleScripts.push(
+                    `<script type="module" src="${staticPrefix}${file}"></script>`
+                );
+            }
         }
     } else {
-        // Fallback for watch mode where metafile may not be available: scan
-        // the directory for top-level .js files (entry chunks only; shared
-        // chunks live under chunks/).
+        // Fallback for watch mode: scan the directory but strictly match the main entry file pattern
         const files = fs.readdirSync(clientDist);
         for (const file of files) {
-            if (file.endsWith('.js')) {
+            const isEntryFile = file === 'client.js' || /^client-[a-zA-Z0-9]+\.js$/.test(file);
+            if (isEntryFile) {
                 modulePreloads.push(
                     `<link rel="modulepreload" href="${staticPrefix}${file}">`
                 );
@@ -272,8 +313,6 @@ function injectAssets(metafile) {
     html = html.replace(/<link rel="modulepreload"[^>]+>/g, '');
     html = html.replace(/<link rel="stylesheet" href="[^"]+">/g, '');
     html = html.replace(/<script type="module"[^>]*><\/script>/g, '');
-    // Also strip legacy defer tags from projects that were built before this
-    // change so that upgrades produce clean HTML.
     html = html.replace(/<script src="[^"]+" defer><\/script>/g, '');
 
     if (modulePreloads.length > 0) {

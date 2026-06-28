@@ -132,6 +132,15 @@ func runInit() {
 		}
 	}
 
+	// Purge stray React configs if Svelte is selected on re-initializations
+	if framework == "svelte" {
+		strayPostcss := filepath.Join(targetDir, sourceDir, "postcss.config.js")
+		if _, err := os.Stat(strayPostcss); err == nil {
+			_ = os.Remove(strayPostcss)
+			fmt.Println("  Cleaned up stray postcss.config.js for Svelte build compatibility")
+		}
+	}
+
 	var templates []FileTemplate
 	if framework == "react" {
 		templates = ReactTemplates(vars)
@@ -179,9 +188,6 @@ func runBuildCmd() {
 	}
 }
 
-// runDevCmd starts the Node.js watcher and a self-reloading Go server.
-// Both processes are tied to a shared context that is cancelled on SIGINT/SIGTERM,
-// ensuring clean shutdown of all child processes.
 func runDevCmd() {
 	cfg, err := revelt.LoadConfig("revelt.json")
 	if err != nil {
@@ -201,18 +207,6 @@ func runDevCmd() {
 	fmt.Println("[revelt] development environment stopped.")
 }
 
-// runUpdateCmd overwrites the three revelt-owned framework files in the
-// project's source directory with the versions embedded in this binary.
-// User code (components, application logic, go.mod, package.json, etc.)
-// is never touched.
-//
-// The target files per framework are:
-//
-//	react:  build.mjs, render-server.js, client.tsx
-//	svelte: build.mjs, render-server.js, client.js
-//
-// Pass --dry-run to print what would be written without modifying the
-// filesystem.
 func runUpdateCmd() {
 	updateCmd := flag.NewFlagSet("update", flag.ExitOnError)
 	dryRun := updateCmd.Bool("dry-run", false, "Print files that would be updated without writing them")
@@ -233,23 +227,25 @@ func runUpdateCmd() {
 		os.Exit(1)
 	}
 
-	// vars must satisfy every {{KEY}} placeholder that the three target
-	// templates reference. TAILWIND_CSS_IMPORT is only used by the Svelte
-	// client entry; we default it to empty so the template renders correctly
-	// for projects that were initialised without Tailwind.
+	// Dynamically check if the project uses Tailwind by verifying if app.css exists.
+	// This prevents updates from erasing the style import inside client.js.
+	tailwindCSSImport := ""
+	appCSSPath := filepath.Join(cfg.SourceDir, "src", "app.css")
+	if _, err := os.Stat(appCSSPath); err == nil {
+		tailwindCSSImport = "import './src/app.css';\n"
+	}
+
 	vars := map[string]string{
 		"SOURCE_DIR":          cfg.SourceDir,
 		"COMPONENT_DIR":       cfg.ComponentDir,
 		"TAILWIND":            "false",
 		"TAILWIND_DEPS":       "",
-		"TAILWIND_CSS_IMPORT": "",
+		"TAILWIND_CSS_IMPORT": tailwindCSSImport,
 	}
 
-	// frameworkFiles maps each template path (inside the embedded FS) to the
-	// output path it should be written to relative to the project root.
 	type frameworkFiles struct {
-		templateKey string // key inside the pathMap passed to renderTemplates
-		outputPath  string // destination relative to the project root
+		templateKey string
+		outputPath  string
 	}
 
 	var targets []frameworkFiles
@@ -286,9 +282,6 @@ func runUpdateCmd() {
 		}
 	}
 
-	// Build a single-entry pathMap per target and render it through the
-	// existing renderTemplates machinery so placeholder substitution is
-	// identical to what init produces.
 	fs := reactTemplatesFS
 	if framework == "svelte" {
 		fs = svelteTemplatesFS
@@ -305,7 +298,6 @@ func runUpdateCmd() {
 		if err != nil {
 			log.Fatalf("Error rendering template %s: %v\n", t.templateKey, err)
 		}
-		// renderTemplates returns exactly one entry per input key.
 		file := rendered[0]
 
 		if *dryRun {
