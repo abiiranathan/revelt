@@ -253,31 +253,39 @@ func runUpdateCmd() {
 	case "react":
 		targets = []frameworkFiles{
 			{
-				templateKey: "templates/react/frontend_build.mjs.tpl",
+				templateKey: "templates/react/build.mjs.tpl",
 				outputPath:  filepath.Join(cfg.SourceDir, "build.mjs"),
 			},
 			{
-				templateKey: "templates/react/frontend_render-server.js.tpl",
+				templateKey: "templates/react/render-server.js.tpl",
 				outputPath:  filepath.Join(cfg.SourceDir, "render-server.js"),
 			},
 			{
-				templateKey: "templates/react/frontend_client.tsx.tpl",
+				templateKey: "templates/react/client.tsx.tpl",
 				outputPath:  filepath.Join(cfg.SourceDir, "client.tsx"),
+			},
+			{
+				templateKey: "templates/react/revelt.types.d.ts.tpl",
+				outputPath:  filepath.Join(cfg.SourceDir, "revelt.types.d.ts"),
 			},
 		}
 	case "svelte":
 		targets = []frameworkFiles{
 			{
-				templateKey: "templates/svelte/frontend_build.mjs.tpl",
+				templateKey: "templates/svelte/build.mjs.tpl",
 				outputPath:  filepath.Join(cfg.SourceDir, "build.mjs"),
 			},
 			{
-				templateKey: "templates/svelte/frontend_render-server.js.tpl",
+				templateKey: "templates/svelte/render-server.js.tpl",
 				outputPath:  filepath.Join(cfg.SourceDir, "render-server.js"),
 			},
 			{
-				templateKey: "templates/svelte/frontend_client.js.tpl",
-				outputPath:  filepath.Join(cfg.SourceDir, "client.js"),
+				templateKey: "templates/svelte/client.ts.tpl",
+				outputPath:  filepath.Join(cfg.SourceDir, "client.ts"),
+			},
+			{
+				templateKey: "templates/svelte/revelt.types.d.ts.tpl",
+				outputPath:  filepath.Join(cfg.SourceDir, "revelt.types.d.ts"),
 			},
 		}
 	}

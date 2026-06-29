@@ -338,7 +338,7 @@ const clientConfig = {
         emptyOutDir: false,
         manifest: true,
         rollupOptions: {
-            input: 'client.js',
+            input: 'client.ts',
             output: {
                 format: 'es',
                 entryFileNames: '[name]-[hash].js',

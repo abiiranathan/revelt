@@ -1,25 +1,44 @@
 {{TAILWIND_CSS_IMPORT}}import { hydrate, mount } from 'svelte';
+import type { Component } from 'svelte';
 import { COMPONENT_REGISTRY } from 'revelt:registry';
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface EagerEntry {
+    Component: Component<any>;
+    load?: never;
+    mode: 'ssr' | 'hydrate' | 'client';
+}
+
+interface LazyEntry {
+    Component?: never;
+    load: () => Promise<Component<any>>;
+    mode: 'lazy-client';
+}
+
+type RegistryEntry = EagerEntry | LazyEntry;
 
 // ---------------------------------------------------------------------------
 // Island hydration
 // ---------------------------------------------------------------------------
 
-async function resolveComponent(entry) {
+async function resolveComponent(entry: RegistryEntry): Promise<Component<any>> {
     if (entry.Component) {
         return entry.Component;
     }
     return entry.load();
 }
 
-async function hydrateIsland(el) {
+async function hydrateIsland(el: HTMLElement): Promise<void> {
     if (el.dataset.rssrMounted === 'true') return;
 
     const name = el.getAttribute('data-ssr-island');
     if (!name) return;
 
     const propsAttr = el.getAttribute('data-ssr-props');
-    const props = propsAttr ? JSON.parse(propsAttr) : {};
+    const props: Record<string, unknown> = propsAttr ? JSON.parse(propsAttr) : {};
 
     const entry = COMPONENT_REGISTRY.get(name);
     if (!entry) {
@@ -37,24 +56,24 @@ async function hydrateIsland(el) {
     el.dataset.rssrMounted = 'true';
 }
 
-async function hydrateIslands(root) {
-    const islands = root.querySelectorAll('[data-ssr-island]');
+async function hydrateIslands(root: Element | Document): Promise<void> {
+    const islands = root.querySelectorAll<HTMLElement>('[data-ssr-island]');
     for (const el of islands) {
         void hydrateIsland(el);
     }
 }
 
-function observeIslands(root) {
-    const observer = new MutationObserver((mutations) => {
+function observeIslands(root: Element | Document): void {
+    const observer = new MutationObserver((mutations: MutationRecord[]) => {
         for (const mutation of mutations) {
             if (mutation.type === 'childList') {
                 mutation.addedNodes.forEach((node) => {
                     if (node instanceof Element) {
                         if (node.hasAttribute('data-ssr-island')) {
-                            void hydrateIsland(node);
+                            void hydrateIsland(node as HTMLElement);
                         }
-                        const islands = node.querySelectorAll('[data-ssr-island]');
-                        islands.forEach((island) => void hydrateIsland(island));
+                        node.querySelectorAll<HTMLElement>('[data-ssr-island]')
+                            .forEach((island) => void hydrateIsland(island));
                     }
                 });
             }
@@ -68,7 +87,7 @@ function observeIslands(root) {
 // History API router (Optional Fallback)
 // ---------------------------------------------------------------------------
 
-async function fetchPage(url) {
+async function fetchPage(url: string): Promise<string> {
     const res = await fetch(url, {
         headers: { Accept: 'text/html' },
         credentials: 'same-origin',
@@ -79,7 +98,7 @@ async function fetchPage(url) {
     return doc.body.innerHTML;
 }
 
-async function navigate(url) {
+async function navigate(url: string): Promise<void> {
     try {
         const bodyHTML = await fetchPage(url);
         document.body.innerHTML = bodyHTML;
@@ -91,11 +110,14 @@ async function navigate(url) {
     }
 }
 
-function interceptLinks() {
-    document.addEventListener('click', (e) => {
+function interceptLinks(): void {
+    document.addEventListener('click', (e: MouseEvent) => {
         if (e.defaultPrevented) return;
 
-        const anchor = /** @type {Element} */ (e.target).closest('a');
+        const target = e.target;
+        if (!(target instanceof Element)) return;
+
+        const anchor = target.closest('a');
         if (!anchor) return;
 
         const href = anchor.getAttribute('href');
@@ -118,9 +140,9 @@ function interceptLinks() {
     });
 }
 
-function handlePopState() {
-    window.addEventListener('popstate', (e) => {
-        if (e.state && e.state.revelt) {
+function handlePopState(): void {
+    window.addEventListener('popstate', (e: PopStateEvent) => {
+        if (e.state && (e.state as { revelt?: boolean }).revelt) {
             navigate(location.pathname + location.search);
         }
     });
@@ -130,9 +152,9 @@ function handlePopState() {
 // Bootstrap
 // ---------------------------------------------------------------------------
 
-async function bootstrap() {
+async function bootstrap(): Promise<void> {
     history.replaceState({ revelt: true, url: location.pathname + location.search }, '');
-    
+
     await hydrateIslands(document);
     observeIslands(document.body);
 
@@ -141,7 +163,7 @@ async function bootstrap() {
 }
 
 if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', bootstrap);
+    document.addEventListener('DOMContentLoaded', () => void bootstrap());
 } else {
-    bootstrap();
+    void bootstrap();
 }
