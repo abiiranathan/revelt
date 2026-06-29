@@ -26,3 +26,13 @@ declare module 'revelt:registry' {
 
     export const COMPONENT_REGISTRY: Map<string, RegistryEntry>;
 }
+
+declare module '*.css' {
+    const styles: Record<string, string>;
+    export default styles;
+}
+
+declare module '*.module.css' {
+    const styles: Record<string, string>;
+    export default styles;
+}
