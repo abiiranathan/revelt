@@ -70,6 +70,10 @@ type ProjectConfig struct {
 	// ComponentDir is the directory name (relative to SourceDir) containing components.
 	ComponentDir string `json:"component_dir"`
 
+	// GoBuildCmd is the command to build the go project.
+	// Default is "go build"
+	GoBuildCmd string `json:"go_build_cmd"`
+
 	// ComponentModes maps each discovered component name to its execution mode.
 	// Populated by LoadConfig via filesystem discovery; not present in JSON.
 	ComponentModes map[string]string `json:"-"`

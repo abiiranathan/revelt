@@ -6,5 +6,6 @@
   "timeout_ms": 500,
   "port": 8080,
   "static_prefix": "/static/",
-  "component_dir": "{{COMPONENT_DIR}}"
+  "component_dir": "{{COMPONENT_DIR}}",
+  "go_build_cmd": "go build"
 }

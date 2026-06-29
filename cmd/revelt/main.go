@@ -176,16 +176,51 @@ func runBuildCmd() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Building frontend in %s…\n", cfg.SourceDir)
-	cmd := exec.Command("node", "build.mjs")
-	cmd.Dir = cfg.SourceDir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	type result struct {
+		name string
+		err  error
+	}
 
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("Build failed: %v\n", err)
+	results := make(chan result, 2)
+
+	// Frontend: node build.mjs in the source directory.
+	go func() {
+		fmt.Printf("Building frontend in %s…\n", cfg.SourceDir)
+		cmd := exec.Command("node", "build.mjs")
+		cmd.Dir = cfg.SourceDir
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		results <- result{"frontend", cmd.Run()}
+	}()
+
+	// Backend: compile the Go project rooted at the working directory.
+	go func() {
+		if cfg.GoBuildCmd == "" {
+			results <- result{"backend", nil} // nothing configured, skip silently
+			return
+		}
+
+		parts := strings.Fields(cfg.GoBuildCmd)
+		fmt.Printf("Building Go project: %s\n", cfg.GoBuildCmd)
+		cmd := exec.Command(parts[0], parts[1:]...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		results <- result{"backend", cmd.Run()}
+	}()
+
+	var failed bool
+	for range 2 {
+		if r := <-results; r.err != nil {
+			fmt.Printf("%s build failed: %v\n", r.name, r.err)
+			failed = true
+		}
+	}
+
+	if failed {
 		os.Exit(1)
 	}
+
+	fmt.Println("Build complete.")
 }
 
 func runDevCmd() {
