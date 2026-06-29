@@ -28,9 +28,6 @@ type RenderInput struct {
 type RenderOutput struct {
 	// HTML is the serialized component markup.
 	HTML string
-
-	// Head contains any page title, meta, or link tag injections.
-	Head string
 }
 
 // WorkerStat describes the liveness state of an individual Node worker process.
@@ -238,7 +235,7 @@ func (r *Renderer) Render(ctx context.Context, in RenderInput) (RenderOutput, er
 					in.Component, escapedProps,
 				)
 			}
-			return RenderOutput{HTML: placeholder, Head: ""}, nil
+			return RenderOutput{HTML: placeholder}, nil
 		}
 	}
 
@@ -261,7 +258,7 @@ func (r *Renderer) Render(ctx context.Context, in RenderInput) (RenderOutput, er
 		return RenderOutput{}, fmt.Errorf("revelt: component %q: %s", in.Component, resp.Error)
 	}
 
-	return RenderOutput{HTML: resp.HTML, Head: resp.Head}, nil
+	return RenderOutput{HTML: resp.HTML}, nil
 }
 
 // Stats returns a point-in-time state snapshot of the active worker pool.

@@ -59,7 +59,7 @@ function handleRequest(req) {
         const serializedProps = escapeHtml(JSON.stringify(props));
         const wrappedHtml = '<div data-ssr-island="' + component + '" data-ssr-props="' + serializedProps + '">' + html + '</div>';
 
-        respond({ id, html: wrappedHtml, head: '' });
+        respond({ id, html: wrappedHtml });
     } catch (err) {
         process.stderr.write('[revelt] render error for "' + component + '": ' + (err.stack ?? err.message) + '\n');
         respond({ id, error: err.message });

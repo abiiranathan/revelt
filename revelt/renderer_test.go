@@ -24,8 +24,7 @@ rl.on('line', line => {
         return;
     }
     const html = '<div data-component="' + req.component + '"></div>';
-    const head = '<title>' + req.component + '</title>';
-    process.stdout.write(JSON.stringify({ id: req.id, html, head }) + '\n');
+    process.stdout.write(JSON.stringify({ id: req.id, html }) + '\n');
 });
 
 rl.on('close', () => process.exit(0));
@@ -70,10 +69,6 @@ func TestRenderBasic(t *testing.T) {
 		t.Errorf("HTML: got %q, want %q", out.HTML, wantHTML)
 	}
 
-	wantHead := `<title>Counter</title>`
-	if out.Head != wantHead {
-		t.Errorf("Head: got %q, want %q", out.Head, wantHead)
-	}
 }
 
 // TestClientOnlyRender ensures that client-only configurations bypass the Node engine.

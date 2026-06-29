@@ -51,11 +51,11 @@ function handleRequest(req) {
     const { Component } = entry;
 
     try {
-        const { html, head } = render(Component, { props });
+        const { html } = render(Component, { props });
         const serializedProps = escapeHtml(JSON.stringify(props));
         const wrappedHtml = '<div data-ssr-island="' + component + '" data-ssr-props="' + serializedProps + '">' + html + '</div>';
 
-        respond({ id, html: wrappedHtml, head: head ?? '' });
+        respond({ id, html: wrappedHtml });
     } catch (err) {
         process.stderr.write('[revelt] render error for "' + component + '": ' + (err.stack ?? err.message) + '\n');
         respond({ id, error: err.message });
