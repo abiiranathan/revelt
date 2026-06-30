@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -135,6 +136,8 @@ type Renderer struct {
 }
 
 // New constructs and runs a Renderer backed by a supervised process pool.
+// In revelt/renderer.go inside New():
+
 func New(ctx context.Context, script string, opts ...Option) (*Renderer, error) {
 	_, err := os.Stat(script)
 	if err != nil {
@@ -151,9 +154,26 @@ func New(ctx context.Context, script string, opts ...Option) (*Renderer, error) 
 		}
 	}
 
+	// Resolve absolute path to local node_modules to let Node find dependencies
+	// when running extracted scripts in temporary directories.
+	var envs []string
+	if cfg.ProjectCfg != nil {
+		absSourceDir, err := filepath.Abs(cfg.ProjectCfg.SourceDir)
+		if err == nil {
+			nodeModulesPath := filepath.Join(absSourceDir, "node_modules")
+			envs = append(os.Environ(), "NODE_PATH="+nodeModulesPath)
+		}
+	} else {
+		absDir, err := filepath.Abs(".")
+		if err == nil {
+			envs = append(os.Environ(), "NODE_PATH="+filepath.Join(absDir, "node_modules"))
+		}
+	}
+
 	wCfg := workerConfig{
 		NodeBin:     cfg.NodeBin,
 		ReadBufSize: cfg.ReadBufSize,
+		Env:         envs,
 	}
 
 	p, err := newPool(ctx, script, cfg.Workers, wCfg)

@@ -310,7 +310,9 @@ const serverConfig = {
         alias: { '@': resolve(__dirname, parentDir) },
     },
     ssr: {
-        noExternal: ['revelt:registry'],
+        // Changed from ['revelt:registry'] to true because I want to embed
+        // all static assets for node to run without node_modules folder.
+        noExternal: true, 
     },
     build: {
         ssr: true,

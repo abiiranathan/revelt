@@ -80,7 +80,8 @@ const serverBuildOptions = {
     },
     sourcemap: watchMode ? 'inline' : false,
     logOverride: { 'ignored-bare-import': 'silent' },
-    external: ['react', 'react-dom', 'react-dom/server'],
+    // Remove external because we want self-contained binaries.
+    // external: ['react', 'react-dom', 'react-dom/server'],
     plugins: [componentRegistryPlugin('server')],
 };
 

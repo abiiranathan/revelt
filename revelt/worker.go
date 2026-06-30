@@ -60,6 +60,9 @@ type worker struct {
 // lifetime: cancelling it sends SIGKILL to the Node process.
 func newWorker(ctx context.Context, script string, cfg workerConfig) (*worker, error) {
 	cmd := exec.CommandContext(ctx, cfg.NodeBin, script)
+	if len(cfg.Env) > 0 {
+		cmd.Env = cfg.Env
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -263,4 +266,7 @@ type workerConfig struct {
 	// WriteTimeout is an optional per-write deadline applied when writing to
 	// stdin. Zero means no timeout (the caller's context is the deadline).
 	WriteTimeout time.Duration
+
+	// Env specifies the environment variables for the Node.js subprocess.
+	Env []string
 }
