@@ -12,7 +12,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -448,16 +447,23 @@ func (b *PageBuilder) Render(ctx context.Context, w http.ResponseWriter) error {
 
 // resolveTemplate returns the raw HTML template string for this builder. If a
 // template was supplied via NewPageWithTemplate it is returned as-is; otherwise
-// the default index.html is read from disk.
+// the default index.html is read via the app's static filesystem, which
+// transparently falls back to the embedded build when running from a
+// deployed binary with no frontend source tree present.
 func (b *PageBuilder) resolveTemplate() (string, error) {
 	if b.template != "" {
 		return b.template, nil
 	}
 
-	indexPath := filepath.Join(b.app.cfg.OutDir, clientDir, "index.html")
-	data, err := os.ReadFile(indexPath)
+	f, err := b.app.staticFs.Open("index.html")
 	if err != nil {
-		return "", fmt.Errorf("reading %s: %w", indexPath, err)
+		return "", fmt.Errorf("opening index.html: %w", err)
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return "", fmt.Errorf("reading index.html: %w", err)
 	}
 	return string(data), nil
 }
