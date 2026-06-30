@@ -202,8 +202,7 @@ function injectAssets() {
         for (const entry of Object.values(manifest)) {
             if (!entry.isEntry) continue;
             
-            // Only inject the main entry file (starting with 'client'), skippi
-ng dynamic split chunks
+            // Only inject the main entry file (starting with 'client'), skipping dynamic split chunks
             const file = entry.file;
             if (file.startsWith('client')) {
                 modulePreloads.push(
@@ -217,8 +216,7 @@ ng dynamic split chunks
     } else {
         const files = fs.readdirSync(clientDist);
         for (const file of files) {
-            // Match main client entry file (e.g. client.js or client-hash.js), 
-ignoring lazy route chunks
+            // Match main client entry file (e.g. client.js or client-hash.js), ignoring lazy route chunks
             const isEntryFile = file === 'client.js' || /^client-[a-zA-Z0-9]+\.js$/.test(file);
             if (isEntryFile) {
                 modulePreloads.push(

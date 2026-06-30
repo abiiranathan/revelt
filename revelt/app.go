@@ -91,6 +91,7 @@ type App struct {
 	ctx        context.Context    // merged user + signal context; cancelled on shutdown
 	stopSignal context.CancelFunc // releases the signal.NotifyContext resources
 	cancel     context.CancelFunc // cancels ctx; called in Run's cleanup
+	staticFs   http.FileSystem    // File system containing client-side static assets
 }
 
 // appOptions holds functional-option overrides for App behaviour.
@@ -192,7 +193,7 @@ func WithoutCompression() AppOption {
 // whichever comes first.
 //
 // Call Run (which takes no context) to start the HTTP server.
-func NewApp(ctx context.Context, configPath string, opts ...AppOption) (*App, error) {
+func NewApp(ctx context.Context, configPath string, staticFS http.FileSystem, opts ...AppOption) (*App, error) {
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("revelt.NewApp: loading config: %w", err)
@@ -246,6 +247,7 @@ func NewApp(ctx context.Context, configPath string, opts ...AppOption) (*App, er
 		ctx:        mergedCtx,
 		stopSignal: stopSignal,
 		cancel:     cancel,
+		staticFs:   staticFS,
 	}
 
 	// Register the static asset handler automatically. Users never need to
@@ -470,8 +472,13 @@ func (b *PageBuilder) resolveTemplate() (string, error) {
 //   - No-cache for the entry file (client-<hash>.js) and CSS.
 //   - Optional on-the-fly gzip compression.
 func (a *App) registerStaticHandler() {
-	assetsDir := filepath.Join(a.cfg.OutDir, clientDir)
-	fs := http.FileServer(http.Dir(assetsDir))
+	// Safe fallback to disk-based directory serving if no filesystem was passed
+	if a.staticFs == nil {
+		assetsDir := filepath.Join(a.cfg.OutDir, clientDir)
+		a.staticFs = http.Dir(assetsDir)
+	}
+
+	fs := http.FileServer(a.staticFs)
 	base := http.StripPrefix(a.cfg.StaticPrefix, fs)
 
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

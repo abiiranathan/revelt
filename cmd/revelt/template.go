@@ -21,7 +21,6 @@ var svelteTemplatesFS embed.FS
 //go:embed templates/index.html
 var IndexPageBytes []byte
 
-// renderTemplates reads all template files from the embedded filesystem
 // renderTemplates reads all template files from the embedded filesystem and
 // substitutes {{KEY}} placeholders in each file's content with the
 // corresponding value from vars.
@@ -68,6 +67,7 @@ func ReactTemplates(vars map[string]string) []FileTemplate {
 		"templates/react/render-server.js.tpl":           "{{SOURCE_DIR}}/render-server.js",
 		"templates/react/build.mjs.tpl":                  "{{SOURCE_DIR}}/build.mjs",
 		"templates/react/main.go.tpl":                    "main.go",
+		"templates/react/embed.go.tpl":                   "embed.go",
 		"templates/react/go.mod.tpl":                     "go.mod",
 	}
 
@@ -94,6 +94,7 @@ func SvelteTemplates(vars map[string]string) []FileTemplate {
 		"templates/svelte/render-server.js.tpl":              "{{SOURCE_DIR}}/render-server.js",
 		"templates/svelte/build.mjs.tpl":                     "{{SOURCE_DIR}}/build.mjs",
 		"templates/svelte/main.go.tpl":                       "main.go",
+		"templates/svelte/embed.go.tpl":                      "embed.go",
 		"templates/svelte/go.mod.tpl":                        "go.mod",
 	}
 

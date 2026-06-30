@@ -31,6 +31,10 @@ func main() {
 		runBuildCmd()
 	case "dev":
 		runDevCmd()
+	case "generate", "g":
+		runGenerateCmd()
+	case "clean":
+		runCleanCmd()
 	case "update":
 		runUpdateCmd()
 	case "version":
@@ -42,14 +46,78 @@ func main() {
 	}
 }
 
+// printUsage displays instructions for each of the available subcommands.
 func printUsage() {
 	fmt.Println("Usage: revelt <command> [arguments]")
 	fmt.Println("\nCommands:")
 	fmt.Println("  init     Initialize a new revelt project")
 	fmt.Println("  build    Build frontend assets (server and client bundles)")
 	fmt.Println("  dev      Start the development environment (watcher + auto-reloading server)")
+	fmt.Println("  generate Generate new components (shorthand: g)")
+	fmt.Println("  clean    Purge compiled frontend assets, build caches, and dev binaries")
 	fmt.Println("  update   Update framework files (build.mjs, render-server.js, client entry)")
 	fmt.Println("  version  Print the revelt version")
+}
+
+// validateConfig validates structural properties of the parsed configuration.
+func validateConfig(cfg *revelt.ProjectConfig) error {
+	framework := strings.ToLower(cfg.Framework)
+	if framework != "react" && framework != "svelte" {
+		return fmt.Errorf("unsupported framework %q (must be 'react' or 'svelte')", cfg.Framework)
+	}
+	if cfg.SourceDir == "" {
+		return fmt.Errorf("source_dir cannot be empty")
+	}
+	if cfg.ComponentDir == "" {
+		return fmt.Errorf("component_dir cannot be empty")
+	}
+	if cfg.Port <= 0 || cfg.Port > 65535 {
+		return fmt.Errorf("port %d is out of range (1-65535)", cfg.Port)
+	}
+	return nil
+}
+
+// installDependencies auto-detects and triggers a frontend package installation.
+func installDependencies(dir string) {
+	fmt.Println("\n[revelt] detecting package manager and installing dependencies...")
+
+	managers := []struct {
+		name string
+		args []string
+	}{
+		{"bun", []string{"install"}},
+		{"pnpm", []string{"install"}},
+		{"yarn", []string{"install"}},
+		{"npm", []string{"install"}},
+	}
+
+	var chosenManager string
+	var chosenArgs []string
+
+	for _, m := range managers {
+		if _, err := exec.LookPath(m.name); err == nil {
+			chosenManager = m.name
+			chosenArgs = m.args
+			break
+		}
+	}
+
+	if chosenManager == "" {
+		fmt.Println("[revelt] warning: no package managers (bun, pnpm, yarn, npm) found in PATH. Skipping automated installation.")
+		return
+	}
+
+	fmt.Printf("[revelt] running '%s %s' in %s...\n", chosenManager, strings.Join(chosenArgs, " "), dir)
+	cmd := exec.Command(chosenManager, chosenArgs...)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		fmt.Printf("[revelt] warning: dependency installation failed: %v\n", err)
+	} else {
+		fmt.Println("[revelt] frontend dependencies successfully installed.")
+	}
 }
 
 func runInit() {
@@ -59,6 +127,10 @@ func runInit() {
 	sourceDirOpt := initCmd.String("source-dir", "frontend", "Frontend source directory name (relative to --dir)")
 	componentDirOpt := initCmd.String("component-dir", "src/components", "Component subdirectory name (relative to --source-dir)")
 	tailwindOpt := initCmd.Bool("tailwind", false, "Set up Tailwind CSS v4")
+
+	var installOpt bool
+	initCmd.BoolVar(&installOpt, "install", false, "Automatically install frontend dependencies after project initialization")
+	initCmd.BoolVar(&installOpt, "i", false, "Automatically install frontend dependencies after project initialization (shorthand)")
 
 	if err := initCmd.Parse(os.Args[2:]); err != nil {
 		log.Fatalf("Error parsing flags: %v\n", err)
@@ -73,9 +145,10 @@ func runInit() {
 	sourceDir := *sourceDirOpt
 	componentDir := *componentDirOpt
 
-	sourceDirPath := "./" + sourceDir
+	// Ensure SOURCE_DIR is clean of relative "./" prefixes for go:embed compliance
+	sourceDirPath := filepath.ToSlash(filepath.Clean(sourceDir))
 
-	// Clean path and dynamically find parent directory of componentDir to determine where app.css belongs.
+	// Clean path and dynamically find parent directory of componentDir
 	cleanedCompDir := filepath.ToSlash(filepath.Clean(componentDir))
 	cssParentDir := filepath.ToSlash(filepath.Dir(cleanedCompDir))
 
@@ -176,9 +249,17 @@ func runInit() {
 		fmt.Printf("  Created %s\n", t.Path)
 	}
 
+	if installOpt {
+		installDependencies(filepath.Join(targetDir, sourceDir))
+	}
+
 	fmt.Println("\nProject successfully initialized!")
 	fmt.Println("Next steps:")
-	fmt.Printf("  cd %s && npm install\n", filepath.Join(targetDir, sourceDir))
+	if !installOpt {
+		fmt.Printf("  cd %s && npm install\n", filepath.Join(targetDir, sourceDir))
+	} else {
+		fmt.Printf("  cd %s\n", filepath.Join(targetDir, sourceDir))
+	}
 	fmt.Println("  npm run build")
 	fmt.Println("  cd .. && go mod tidy && go run main.go")
 	fmt.Println("\nOr for live development with auto-reload:")
@@ -189,6 +270,11 @@ func runBuildCmd() {
 	cfg, err := revelt.LoadConfig("revelt.json")
 	if err != nil {
 		fmt.Printf("Error: failed to load configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := validateConfig(cfg); err != nil {
+		fmt.Printf("Error: invalid configuration: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -246,6 +332,11 @@ func runDevCmd() {
 		os.Exit(1)
 	}
 
+	if err := validateConfig(cfg); err != nil {
+		fmt.Printf("Error: invalid configuration: %v\n", err)
+		os.Exit(1)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -256,6 +347,168 @@ func runDevCmd() {
 	runDev(ctx, cfg.SourceDir)
 
 	fmt.Println("[revelt] development environment stopped.")
+}
+
+// runGenerateCmd produces components with annotations configured according to system choices.
+func runGenerateCmd() {
+	genCmd := flag.NewFlagSet("generate", flag.ExitOnError)
+	modeOpt := genCmd.String("mode", "hydrate", "Rendering mode: ssr, hydrate, client, or lazy-client")
+
+	if len(os.Args) < 4 {
+		fmt.Println("Usage: revelt generate component <ComponentName> [--mode=<mode>]")
+		fmt.Println("Shorthand: revelt g component <ComponentName> [--mode=<mode>]")
+		os.Exit(1)
+	}
+
+	itemType := os.Args[2]
+	if itemType != "component" {
+		fmt.Printf("Error: unknown generator type %q. Currently only 'component' is supported.\n", itemType)
+		os.Exit(1)
+	}
+
+	compName := os.Args[3]
+	if compName == "" {
+		fmt.Println("Error: component name cannot be empty")
+		os.Exit(1)
+	}
+	if strings.ContainsAny(compName, " \t\r\n") {
+		fmt.Println("Error: component name cannot contain spaces")
+		os.Exit(1)
+	}
+
+	if err := genCmd.Parse(os.Args[4:]); err != nil {
+		log.Fatalf("Error parsing flags: %v\n", err)
+	}
+
+	cfg, err := revelt.LoadConfig("revelt.json")
+	if err != nil {
+		fmt.Printf("Error: failed to load configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := validateConfig(cfg); err != nil {
+		fmt.Printf("Error: invalid configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	mode := strings.ToLower(*modeOpt)
+	if mode != "ssr" && mode != "hydrate" && mode != "client" && mode != "lazy-client" {
+		log.Fatalf("Error: invalid mode %q. Must be one of: ssr, hydrate, client, lazy-client\n", mode)
+	}
+
+	ext := ".tsx"
+	if strings.ToLower(cfg.Framework) == "svelte" {
+		ext = ".svelte"
+	}
+
+	// Clean component name and ensure first letter is capitalized
+	if len(compName) > 0 {
+		compName = strings.ToUpper(compName[:1]) + compName[1:]
+	}
+
+	targetFile := filepath.Join(cfg.SourceDir, cfg.ComponentDir, compName+ext)
+
+	// Guard to prevent unintended workspace overrides
+	if _, err := os.Stat(targetFile); err == nil {
+		fmt.Printf("Error: component %s already exists at %s\n", compName, targetFile)
+		os.Exit(1)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(targetFile), 0755); err != nil {
+		log.Fatalf("Error creating component directory: %v\n", err)
+	}
+
+	var content string
+	if strings.ToLower(cfg.Framework) == "svelte" {
+		content = fmt.Sprintf(`<!-- @mode %s -->
+<script lang="ts">
+  interface Props {
+    title?: string;
+  }
+  let { title = "%s component" }: Props = $props();
+</script>
+
+<div class="component-box">
+  <h3>{title}</h3>
+  <p>Rendered in %s mode.</p>
+</div>
+
+<style>
+  .component-box {
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 1rem;
+    margin: 0.5rem 0;
+  }
+</style>
+`, mode, compName, mode)
+	} else {
+		content = fmt.Sprintf(`// @mode %s
+
+interface %sProps {
+  title?: string;
+}
+
+export default function %s({ title = "%s component" }: %sProps) {
+  return (
+    <div style={{ border: "1px solid #e2e8f0", borderRadius: "8px", padding: "1rem", margin: "0.5rem 0" }}>
+      <h3>{title}</h3>
+      <p>Rendered in %s mode.</p>
+    </div>
+  );
+}
+`, mode, compName, compName, compName, compName, mode)
+	}
+
+	if err := os.WriteFile(targetFile, []byte(content), 0644); err != nil {
+		log.Fatalf("Error writing component: %v\n", err)
+	}
+
+	fmt.Printf("[revelt] successfully generated component: %s\n", targetFile)
+}
+
+// runCleanCmd deletes binary builds and cache files safely.
+func runCleanCmd() {
+	cfg, err := revelt.LoadConfig("revelt.json")
+	if err != nil {
+		fmt.Printf("Error: failed to load configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := validateConfig(cfg); err != nil {
+		fmt.Printf("Error: invalid configuration: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("[revelt] cleaning workspace...")
+
+	// Remove transient dev binaries
+	bins := []string{"revelt_bin", "revelt_bin.exe"}
+	for _, b := range bins {
+		if err := os.Remove(b); err == nil {
+			fmt.Printf("  removed temporary binary: %s\n", b)
+		}
+	}
+
+	// Safely clean target compile distribution
+	if cfg.OutDir != "" {
+		outPath := filepath.Clean(cfg.OutDir)
+		if outPath != "." && outPath != "/" && outPath != ".." {
+			if err := os.RemoveAll(outPath); err == nil {
+				fmt.Printf("  removed build output directory: %s\n", outPath)
+			} else if !os.IsNotExist(err) {
+				fmt.Printf("  error removing output directory %s: %v\n", outPath, err)
+			}
+		}
+	}
+
+	// Purge local cache configurations
+	cachePath := filepath.Join(cfg.SourceDir, "node_modules", ".vite")
+	if err := os.RemoveAll(cachePath); err == nil && !os.IsNotExist(err) {
+		fmt.Println("  removed vite cache directory")
+	}
+
+	fmt.Println("[revelt] workspace cleaned.")
 }
 
 func runUpdateCmd() {
@@ -272,14 +525,17 @@ func runUpdateCmd() {
 		os.Exit(1)
 	}
 
+	if err := validateConfig(cfg); err != nil {
+		fmt.Printf("Error: invalid configuration: %v\n", err)
+		os.Exit(1)
+	}
+
 	framework := strings.ToLower(cfg.Framework)
 	if framework != "react" && framework != "svelte" {
 		fmt.Printf("Error: unsupported framework %q in revelt.json (must be react or svelte)\n", cfg.Framework)
 		os.Exit(1)
 	}
 
-	// Dynamically check if the project uses Tailwind by verifying if app.css exists.
-	// This prevents updates from erasing the style import inside client.js.
 	// Clean path and dynamically find parent directory of componentDir.
 	cleanedCompDir := filepath.ToSlash(filepath.Clean(cfg.ComponentDir))
 	cssParentDir := filepath.ToSlash(filepath.Dir(cleanedCompDir))
@@ -291,8 +547,8 @@ func runUpdateCmd() {
 		compParentPath = compParentPath + "/"
 	}
 
-	// Dynamically check if the project uses Tailwind by verifying if app.css exists in the resolved folder.
-	// This prevents updates from erasing the style import inside client.js/client.ts.
+	// Dynamically check if the project uses Tailwind by verifying if app.css exists.
+	// This prevents updates from erasing the style import inside client.js.
 	tailwindCSSImport := ""
 	var appCSSPath string
 	if cssParentDir == "." {

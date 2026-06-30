@@ -9,7 +9,13 @@ import (
 )
 
 func main() {
-	app, err := revelt.NewApp(context.Background(), "revelt.json")
+	// Initialize the custom production/development filesystem resolver
+	staticFS, err := GetStaticFS()
+	if err != nil {
+		log.Fatalf("failed to initialize static filesystem: %v", err)
+	}
+
+	app, err := revelt.NewApp(context.Background(), staticFS, "revelt.json")
 	if err != nil {
 		log.Fatalf("failed to start revelt: %v", err)
 	}
