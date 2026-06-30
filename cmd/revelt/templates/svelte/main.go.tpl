@@ -15,7 +15,21 @@ func main() {
 		log.Fatalf("failed to initialize static filesystem: %v", err)
 	}
 
-	app, err := revelt.NewApp(context.Background(), "revelt.json", staticFS )
+	// revelt.json is embedded into the binary at compile time, so no
+	// sibling config file is required at runtime.
+	cfg, err := LoadEmbeddedConfig()
+	if err != nil {
+		log.Fatalf("failed to load embedded config: %v", err)
+	}
+
+	// The Node SSR sidecar is embedded as bytes and must be written to a
+	// real file before exec'ing it; Node cannot run from memory directly.
+	sidecarPath, err := ExtractRenderServer()
+	if err != nil {
+		log.Fatalf("failed to extract render server: %v", err)
+	}
+
+	app, err := revelt.NewAppFromConfig(context.Background(), cfg, staticFS, sidecarPath)
 	if err != nil {
 		log.Fatalf("failed to start revelt: %v", err)
 	}

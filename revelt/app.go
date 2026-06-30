@@ -199,7 +199,19 @@ func NewApp(ctx context.Context, configPath string, staticFS http.FileSystem, op
 	}
 
 	sidecar := filepath.Join(cfg.OutDir, sidecarScript)
+	return newAppWithConfig(ctx, cfg, staticFS, sidecar, opts...)
+}
 
+// NewAppFromConfig initializes the App using a pre-loaded configuration and
+// sidecar path, bypassing the need for an on-disk revelt.json at runtime.
+//
+// Safe for concurrent use by multiple goroutines.
+func NewAppFromConfig(ctx context.Context, cfg *ProjectConfig, staticFS http.FileSystem, sidecarPath string, opts ...AppOption) (*App, error) {
+	return newAppWithConfig(ctx, cfg, staticFS, sidecarPath, opts...)
+}
+
+// newAppWithConfig encapsulates common initialization logic.
+func newAppWithConfig(ctx context.Context, cfg *ProjectConfig, staticFS http.FileSystem, sidecar string, opts ...AppOption) (*App, error) {
 	o := appOptions{
 		readTimeout:     5 * time.Second,
 		writeTimeout:    30 * time.Second,
@@ -214,7 +226,6 @@ func NewApp(ctx context.Context, configPath string, staticFS http.FileSystem, op
 
 	// Layer signal handling on top of the caller's context. The App cancels
 	// on whichever fires first: the caller's ctx, SIGINT, or SIGTERM.
-	// stopSignal must be called to release the signal.NotifyContext resources.
 	sigCtx, stopSignal := signalNotifyContext()
 
 	mergedCtx, cancel := context.WithCancel(ctx)
@@ -249,8 +260,7 @@ func NewApp(ctx context.Context, configPath string, staticFS http.FileSystem, op
 		staticFs:   staticFS,
 	}
 
-	// Register the static asset handler automatically. Users never need to
-	// wire this up themselves.
+	// Register the static asset handler automatically.
 	app.registerStaticHandler()
 
 	return app, nil

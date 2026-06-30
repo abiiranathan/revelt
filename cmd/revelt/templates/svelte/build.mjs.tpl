@@ -51,7 +51,7 @@ function discoverComponents() {
     }
 
     return fs
-        .readdirSync(componentDir)
+        .readdirSync(componentDir, { recursive: true })
         .filter((file) => extname(file) === '.svelte')
         .map((file) => {
             const absPath = resolve(componentDir, file);

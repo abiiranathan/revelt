@@ -191,8 +191,8 @@ func runInit() {
 		log.Fatalf("Error creating directory %s: %v\n", sourceDir, err)
 	}
 
-	// Create dist/client directory structure early and write a placeholder
-	// template to prevent compile-time go:embed path failures on fresh setups.
+	// Create dist/client directory structure early and write placeholder
+	// templates to prevent compile-time go:embed path failures on fresh setups.
 	distClientDir := filepath.Join(targetDir, sourceDir, "dist", "client")
 	if err := os.MkdirAll(distClientDir, 0755); err != nil {
 		log.Fatalf("Error creating distribution folders: %v\n", err)
@@ -202,6 +202,14 @@ func runInit() {
 	}
 	if err := os.WriteFile(filepath.Join(targetDir, sourceDir, "index.html"), IndexPageBytes, 0644); err != nil {
 		log.Fatalf("Error writing template index file: %s\n", err)
+	}
+
+	// Create placeholder render-server.cjs inside dist to prevent compile-time
+	// go:embed failures on fresh setups before the initial build is ran.
+	distDir := filepath.Join(targetDir, sourceDir, "dist")
+	placeholderCJS := filepath.Join(distDir, "render-server.cjs")
+	if err := os.WriteFile(placeholderCJS, []byte("// placeholder\n"), 0644); err != nil {
+		log.Fatalf("Error writing placeholder render-server file: %s\n", err)
 	}
 
 	if *tailwindOpt {

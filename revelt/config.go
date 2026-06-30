@@ -6,7 +6,9 @@ package revelt
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,7 +81,7 @@ type ProjectConfig struct {
 	ComponentModes map[string]string `json:"-"`
 }
 
-// LoadConfig reads, parses, and validates an revelt.json configuration file.
+// LoadConfig reads, parses, and validates a revelt.json configuration file from disk.
 // After parsing, it discovers components from the configured component directory
 // and populates ProjectConfig.ComponentModes by reading @mode annotations,
 // mirroring the discovery logic in build.mjs.
@@ -88,7 +90,23 @@ func LoadConfig(path string) (*ProjectConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading config file: %w", err)
 	}
+	return LoadConfigFromBytes(data)
+}
 
+// LoadConfigFromBytes parses and validates an already-loaded revelt.json
+// payload, scanning the host operating system filesystem for component modes.
+// This is the default entry point used by generated main.go templates during local development.
+func LoadConfigFromBytes(data []byte) (*ProjectConfig, error) {
+	return LoadConfigFromFS(os.DirFS("."), data)
+}
+
+// LoadConfigFromFS parses and validates a configuration payload from bytes,
+// using the provided filesystem to discover component modes. This allows
+// fully self-contained binaries to carry both their configuration and their
+// component source metadata in memory.
+//
+// Safe for concurrent use by multiple goroutines.
+func LoadConfigFromFS(sysFS fs.FS, data []byte) (*ProjectConfig, error) {
 	var cfg ProjectConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config JSON: %w", err)
@@ -113,7 +131,12 @@ func LoadConfig(path string) (*ProjectConfig, error) {
 		cfg.ComponentDir = "src/components"
 	}
 
-	cfg.ComponentModes, err = discoverComponentModes(cfg.SourceDir, cfg.ComponentDir)
+	// Format a valid relative path compliant with fs.FS path specifications (no leading "./").
+	cleanPath := filepath.ToSlash(filepath.Clean(filepath.Join(cfg.SourceDir, cfg.ComponentDir)))
+	cleanPath = strings.TrimPrefix(cleanPath, "./")
+
+	var err error
+	cfg.ComponentModes, err = discoverComponentModes(sysFS, cleanPath)
 	if err != nil {
 		return nil, fmt.Errorf("discovering components: %w", err)
 	}
@@ -121,50 +144,68 @@ func LoadConfig(path string) (*ProjectConfig, error) {
 	return &cfg, nil
 }
 
-// discoverComponentModes scans the component directory and returns a map from
-// component name (filename stem) to its declared rendering mode. Files without
-// a @mode annotation default to ModeHydrate, matching build.mjs behaviour.
-func discoverComponentModes(sourceDir, componentDir string) (map[string]string, error) {
-	dir := filepath.Join(sourceDir, componentDir)
+// discoverComponentModes scans the component directory in the provided filesystem
+// and returns a map from component name (filename stem) to its declared rendering mode.
+// Files without a @mode annotation default to ModeHydrate, matching build.mjs behaviour.
+// discoverComponentModes recursively walks the component directory in the provided filesystem
+// and returns a map from relative component paths (e.g. "admin/Header") to their declared rendering modes.
+// Files without a @mode annotation default to ModeHydrate.
+func discoverComponentModes(sysFS fs.FS, componentDir string) (map[string]string, error) {
+	modes := make(map[string]string)
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// An absent directory is not fatal; the build step will catch it.
-			return make(map[string]string), nil
-		}
-		return nil, fmt.Errorf("reading component directory %q: %w", dir, err)
-	}
-
-	modes := make(map[string]string, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		ext := filepath.Ext(e.Name())
-		if !componentExtensions[ext] {
-			continue
-		}
-
-		stem := strings.TrimSuffix(e.Name(), ext)
-		absPath := filepath.Join(dir, e.Name())
-
-		mode, err := readModeAnnotation(absPath)
+	err := fs.WalkDir(sysFS, componentDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return nil, fmt.Errorf("reading annotation for %q: %w", absPath, err)
+			// If the root component folder does not exist, return an empty map gracefully.
+			if path == componentDir && (os.IsNotExist(err) || errors.Is(err, fs.ErrNotExist)) {
+				return nil
+			}
+			return err
 		}
-		modes[stem] = mode
+
+		// Skip directories themselves; focus only on component source files.
+		if d.IsDir() {
+			return nil
+		}
+
+		ext := filepath.Ext(d.Name())
+		if !componentExtensions[ext] {
+			return nil
+		}
+
+		// Calculate the component path relative to the root component directory.
+		// For example, "frontend/src/components/admin/Header.tsx" relative to
+		// "frontend/src/components" becomes "admin/Header.tsx".
+		relPath, err := filepath.Rel(componentDir, path)
+		if err != nil {
+			return err
+		}
+
+		// Trim file extensions and enforce forward slashes for clean runtime registry keys.
+		relStem := strings.TrimSuffix(relPath, ext)
+		relStem = filepath.ToSlash(relStem)
+
+		mode, err := readModeAnnotation(sysFS, path)
+		if err != nil {
+			return fmt.Errorf("reading annotation for %q: %w", path, err)
+		}
+
+		modes[relStem] = mode
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
 	}
 
 	return modes, nil
 }
 
-// readModeAnnotation scans the first few lines of a component source file for
-// a @mode <ssr|hydrate|client|lazy-client> annotation. Returns ModeHydrate when absent.
-func readModeAnnotation(path string) (string, error) {
+// readModeAnnotation scans the first few lines of a component source file in the
+// provided filesystem for a @mode annotation. Returns ModeHydrate when absent.
+func readModeAnnotation(sysFS fs.FS, path string) (string, error) {
 	const searchLines = 5
 
-	f, err := os.Open(path)
+	f, err := sysFS.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("opening %q: %w", path, err)
 	}
@@ -189,12 +230,12 @@ func readModeAnnotation(path string) (string, error) {
 // ModeLazyClient ("lazy-client") must be tested before ModeClient ("client")
 // because ModeClient is a prefix of ModeLazyClient.
 func extractMode(line string) (string, bool) {
-	idx := strings.Index(line, "@mode")
-	if idx == -1 {
+	_, after, ok := strings.Cut(line, "@mode")
+	if !ok {
 		return "", false
 	}
 
-	rest := strings.TrimSpace(line[idx+len("@mode"):])
+	rest := strings.TrimSpace(after)
 	switch {
 	case strings.HasPrefix(rest, ModeSSR):
 		return ModeSSR, true

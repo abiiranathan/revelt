@@ -47,7 +47,7 @@ function discoverComponents() {
     const COMPONENT_EXTENSIONS = new Set(['.tsx', '.ts', '.jsx', '.js']);
 
     return fs
-        .readdirSync(componentDir)
+        .readdirSync(componentDir, { recursive: true })
         .filter((file) => COMPONENT_EXTENSIONS.has(extname(file)))
         .map((file) => {
             const absPath = resolve(componentDir, file);
