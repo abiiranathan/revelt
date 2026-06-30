@@ -12,6 +12,9 @@ const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 const componentDirName = config.component_dir ?? 'components';
 const componentDir = resolve(__dirname, componentDirName);
 
+// Derive root source path containing components (e.g., 'src' or '.')
+const parentDir = dirname(componentDirName);
+
 /** @typedef {'ssr' | 'hydrate' | 'client' | 'lazy-client'} ComponentMode */
 
 /**
@@ -199,7 +202,8 @@ function injectAssets() {
         for (const entry of Object.values(manifest)) {
             if (!entry.isEntry) continue;
             
-            // Only inject the main entry file (starting with 'client'), skipping dynamic split chunks
+            // Only inject the main entry file (starting with 'client'), skippi
+ng dynamic split chunks
             const file = entry.file;
             if (file.startsWith('client')) {
                 modulePreloads.push(
@@ -213,7 +217,8 @@ function injectAssets() {
     } else {
         const files = fs.readdirSync(clientDist);
         for (const file of files) {
-            // Match main client entry file (e.g. client.js or client-hash.js), ignoring lazy route chunks
+            // Match main client entry file (e.g. client.js or client-hash.js), 
+ignoring lazy route chunks
             const isEntryFile = file === 'client.js' || /^client-[a-zA-Z0-9]+\.js$/.test(file);
             if (isEntryFile) {
                 modulePreloads.push(
@@ -269,7 +274,6 @@ function injectAssets() {
     console.error(`[revelt] injected assets into ${outPath}`);
 }
 
-
 function htmlPlugin() {
     return {
         name: 'html-inject-plugin',
@@ -290,7 +294,7 @@ const serverPlugins = [
     componentRegistryPlugin('server'),
 ];
 
-const appCssPath = resolve(__dirname, 'src/app.css');
+const appCssPath = resolve(__dirname, parentDir, 'app.css');
 if (fs.existsSync(appCssPath)) {
     try {
         const tailwind = (await import('@tailwindcss/vite')).default;
@@ -305,7 +309,7 @@ if (fs.existsSync(appCssPath)) {
 const serverConfig = {
     plugins: serverPlugins,
     resolve: {
-        alias: { '@': resolve(__dirname, 'src') },
+        alias: { '@': resolve(__dirname, parentDir) },
     },
     ssr: {
         noExternal: ['revelt:registry'],
@@ -329,7 +333,7 @@ const serverConfig = {
 const clientConfig = {
     plugins: clientPlugins,
     resolve: {
-        alias: { '@': resolve(__dirname, 'src') },
+        alias: { '@': resolve(__dirname, parentDir) },
     },
     build: {
         minify: !watchMode,

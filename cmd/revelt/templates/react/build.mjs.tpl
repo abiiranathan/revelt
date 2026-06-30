@@ -11,6 +11,9 @@ const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 const componentDirName = config.component_dir ?? 'src/components';
 const componentDir = resolve(__dirname, componentDirName);
 
+// Derive root source path containing components (e.g., 'src' or '.')
+const parentDir = dirname(componentDirName);
+
 /** @typedef {'ssr' | 'hydrate' | 'client'} ComponentMode */
 
 /**
@@ -73,7 +76,7 @@ const serverBuildOptions = {
     jsx: 'transform',
     resolveExtensions: ['.tsx', '.ts', '.jsx', '.js', '.json'],
     alias: {
-        '@': resolve(__dirname, 'src'),
+        '@': resolve(__dirname, parentDir),
     },
     sourcemap: watchMode ? 'inline' : false,
     logOverride: { 'ignored-bare-import': 'silent' },
@@ -107,7 +110,7 @@ const clientBuildOptions = {
     jsx: 'transform',
     resolveExtensions: ['.tsx', '.ts', '.jsx', '.js', '.json'],
     alias: {
-        '@': resolve(__dirname, 'src'),
+        '@': resolve(__dirname, parentDir),
     },
     sourcemap: watchMode ? 'inline' : false,
     logOverride: { 'ignored-bare-import': 'silent' },
@@ -222,7 +225,7 @@ function componentRegistryPlugin(side) {
 }
 
 async function buildCSS() {
-    const cssInput = resolve(__dirname, 'src/app.css');
+    const cssInput = resolve(__dirname, parentDir, 'app.css');
     if (!fs.existsSync(cssInput)) return;
 
     try {
@@ -235,7 +238,7 @@ async function buildCSS() {
         });
         fs.mkdirSync(resolve(__dirname, 'dist/client'), { recursive: true });
         fs.writeFileSync(resolve(__dirname, 'dist/client/client.css'), result.css, 'utf8');
-        console.error('[revelt] built CSS with Tailwind v4 → dist/client/client.css');
+        console.error(`[revelt] built CSS with Tailwind v4 → dist/client/client.css`);
     } catch (err) {
         console.error('[revelt] failed to compile CSS:', err.message);
     }
@@ -267,7 +270,8 @@ function injectAssets(metafile) {
     if (!fs.existsSync(clientDist)) return;
 
     if (metafile) {
-        // When using metafile, only target outputs originating from the client entry point
+        // When using metafile, only target outputs originating from the client
+ entry point
         for (const [outPath, meta] of Object.entries(metafile.outputs)) {
             if (!meta.entryPoint) continue;
             const file = outPath.replace(/^dist\/client\//, '');
@@ -281,7 +285,8 @@ function injectAssets(metafile) {
             }
         }
     } else {
-        // Fallback for watch mode: scan the directory but strictly match the main entry file pattern
+        // Fallback for watch mode: scan the directory but strictly match the m
+ain entry file pattern
         const files = fs.readdirSync(clientDist);
         for (const file of files) {
             const isEntryFile = file === 'client.js' || /^client-[a-zA-Z0-9]+\.js$/.test(file);

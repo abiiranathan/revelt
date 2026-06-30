@@ -75,6 +75,17 @@ func runInit() {
 
 	sourceDirPath := "./" + sourceDir
 
+	// Clean path and dynamically find parent directory of componentDir to determine where app.css belongs.
+	cleanedCompDir := filepath.ToSlash(filepath.Clean(componentDir))
+	cssParentDir := filepath.ToSlash(filepath.Dir(cleanedCompDir))
+
+	compParentPath := cssParentDir
+	if compParentPath == "." {
+		compParentPath = ""
+	} else {
+		compParentPath = compParentPath + "/"
+	}
+
 	tailwindDeps := ""
 	tailwindCSSImport := ""
 	if *tailwindOpt {
@@ -82,7 +93,11 @@ func runInit() {
 			tailwindDeps = ",\n    \"tailwindcss\": \"^4.0.0\",\n    \"@tailwindcss/postcss\": \"^4.0.0\",\n    \"postcss\": \"^8.4.38\""
 		} else {
 			tailwindDeps = ",\n    \"tailwindcss\": \"^4.0.0\",\n    \"@tailwindcss/vite\": \"^4.0.0\""
-			tailwindCSSImport = "import './src/app.css';\n"
+			if cssParentDir == "." {
+				tailwindCSSImport = "import './app.css';\n"
+			} else {
+				tailwindCSSImport = fmt.Sprintf("import './%s/app.css';\n", cssParentDir)
+			}
 		}
 	}
 
@@ -92,6 +107,7 @@ func runInit() {
 		"TAILWIND":            strconv.FormatBool(*tailwindOpt),
 		"TAILWIND_DEPS":       tailwindDeps,
 		"TAILWIND_CSS_IMPORT": tailwindCSSImport,
+		"COMP_PARENT_PATH":    compParentPath,
 	}
 
 	fmt.Printf("Initializing revelt %s project in: %s\n", framework, targetDir)
@@ -116,12 +132,21 @@ func runInit() {
 	}
 
 	if *tailwindOpt {
-		appCssDir := filepath.Join(targetDir, sourceDir, "src")
+		var appCssDir string
+		if cssParentDir == "." {
+			appCssDir = filepath.Join(targetDir, sourceDir)
+		} else {
+			appCssDir = filepath.Join(targetDir, sourceDir, cssParentDir)
+		}
 		_ = os.MkdirAll(appCssDir, 0755)
 		if err := os.WriteFile(filepath.Join(appCssDir, "app.css"), []byte("@import \"tailwindcss\";\n"), 0644); err != nil {
 			log.Fatalf("Error writing app.css file: %s\n", err)
 		}
-		fmt.Println("  Created src/app.css with Tailwind CSS v4 directive")
+		if cssParentDir == "." {
+			fmt.Println("  Created app.css with Tailwind CSS v4 directive")
+		} else {
+			fmt.Printf("  Created %s/app.css with Tailwind CSS v4 directive\n", cssParentDir)
+		}
 
 		if framework == "react" {
 			postcssConfig := "export default {\n  plugins: {\n    '@tailwindcss/postcss': {},\n  },\n};\n"
@@ -129,15 +154,6 @@ func runInit() {
 				log.Fatalf("Error writing postcss.config.js file: %s\n", err)
 			}
 			fmt.Println("  Created postcss.config.js for editor autocompletion & style loaders")
-		}
-	}
-
-	// Purge stray React configs if Svelte is selected on re-initializations
-	if framework == "svelte" {
-		strayPostcss := filepath.Join(targetDir, sourceDir, "postcss.config.js")
-		if _, err := os.Stat(strayPostcss); err == nil {
-			_ = os.Remove(strayPostcss)
-			fmt.Println("  Cleaned up stray postcss.config.js for Svelte build compatibility")
 		}
 	}
 
@@ -264,10 +280,33 @@ func runUpdateCmd() {
 
 	// Dynamically check if the project uses Tailwind by verifying if app.css exists.
 	// This prevents updates from erasing the style import inside client.js.
+	// Clean path and dynamically find parent directory of componentDir.
+	cleanedCompDir := filepath.ToSlash(filepath.Clean(cfg.ComponentDir))
+	cssParentDir := filepath.ToSlash(filepath.Dir(cleanedCompDir))
+
+	compParentPath := cssParentDir
+	if compParentPath == "." {
+		compParentPath = ""
+	} else {
+		compParentPath = compParentPath + "/"
+	}
+
+	// Dynamically check if the project uses Tailwind by verifying if app.css exists in the resolved folder.
+	// This prevents updates from erasing the style import inside client.js/client.ts.
 	tailwindCSSImport := ""
-	appCSSPath := filepath.Join(cfg.SourceDir, "src", "app.css")
+	var appCSSPath string
+	if cssParentDir == "." {
+		appCSSPath = filepath.Join(cfg.SourceDir, "app.css")
+	} else {
+		appCSSPath = filepath.Join(cfg.SourceDir, cssParentDir, "app.css")
+	}
+
 	if _, err := os.Stat(appCSSPath); err == nil {
-		tailwindCSSImport = "import './src/app.css';\n"
+		if cssParentDir == "." {
+			tailwindCSSImport = "import './app.css';\n"
+		} else {
+			tailwindCSSImport = fmt.Sprintf("import './%s/app.css';\n", cssParentDir)
+		}
 	}
 
 	vars := map[string]string{
@@ -276,6 +315,7 @@ func runUpdateCmd() {
 		"TAILWIND":            "false",
 		"TAILWIND_DEPS":       "",
 		"TAILWIND_CSS_IMPORT": tailwindCSSImport,
+		"COMP_PARENT_PATH":    compParentPath,
 	}
 
 	type frameworkFiles struct {

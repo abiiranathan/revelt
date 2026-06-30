@@ -11,8 +11,8 @@
     "noEmit": true,
     "allowJs": true,
     "paths": {
-        "@/*": ["./src/*"]
-    },
+        "@/*": ["./{{COMP_PARENT_PATH}}*"]
+    }
   },
   "include": [
     "build.mjs",
