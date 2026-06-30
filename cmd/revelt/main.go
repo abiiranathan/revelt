@@ -278,48 +278,50 @@ func runBuildCmd() {
 		os.Exit(1)
 	}
 
-	type result struct {
-		name string
-		err  error
+	// 1. Run 'go mod tidy' automatically if go.sum is missing or revelt is not configured
+	var runTidy bool
+	if _, err := os.Stat("go.sum"); os.IsNotExist(err) {
+		runTidy = true
+	} else {
+		goModData, err := os.ReadFile("go.mod")
+		if err == nil && !strings.Contains(string(goModData), "github.com/abiiranathan/revelt") {
+			runTidy = true
+		}
 	}
 
-	results := make(chan result, 2)
-
-	// Frontend: node build.mjs in the source directory.
-	go func() {
-		fmt.Printf("Building frontend in %s…\n", cfg.SourceDir)
-		cmd := exec.Command("node", "build.mjs")
-		cmd.Dir = cfg.SourceDir
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		results <- result{"frontend", cmd.Run()}
-	}()
-
-	// Backend: compile the Go project rooted at the working directory.
-	go func() {
-		if cfg.GoBuildCmd == "" {
-			results <- result{"backend", nil} // nothing configured, skip silently
-			return
+	if runTidy {
+		fmt.Println("[revelt] resolving dependencies using 'go mod tidy'...")
+		tidyCmd := exec.Command("go", "mod", "tidy")
+		tidyCmd.Stdout = os.Stdout
+		tidyCmd.Stderr = os.Stderr
+		if err := tidyCmd.Run(); err != nil {
+			fmt.Printf("Error: 'go mod tidy' execution failed: %v\n", err)
+			os.Exit(1)
 		}
+	}
 
+	// 2. Build Frontend (Produces assets inside dist/client/ for embedding)
+	fmt.Printf("Building frontend in %s…\n", cfg.SourceDir)
+	feCmd := exec.Command("node", "build.mjs")
+	feCmd.Dir = cfg.SourceDir
+	feCmd.Stdout = os.Stdout
+	feCmd.Stderr = os.Stderr
+	if err := feCmd.Run(); err != nil {
+		fmt.Printf("Error: frontend build failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 3. Build Backend (Safely embeds the compiled frontend assets)
+	if cfg.GoBuildCmd != "" {
 		parts := strings.Fields(cfg.GoBuildCmd)
 		fmt.Printf("Building Go project: %s\n", cfg.GoBuildCmd)
-		cmd := exec.Command(parts[0], parts[1:]...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		results <- result{"backend", cmd.Run()}
-	}()
-
-	var failed bool
-	for range 2 {
-		if r := <-results; r.err != nil {
-			fmt.Printf("%s build failed: %v\n", r.name, r.err)
-			failed = true
+		beCmd := exec.Command(parts[0], parts[1:]...)
+		beCmd.Stdout = os.Stdout
+		beCmd.Stderr = os.Stderr
+		if err := beCmd.Run(); err != nil {
+			fmt.Printf("Error: backend build failed: %v\n", err)
+			os.Exit(1)
 		}
-	}
-
-	if failed {
-		os.Exit(1)
 	}
 
 	fmt.Println("Build complete.")
