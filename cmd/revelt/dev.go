@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io/fs"
 	"log"
@@ -15,7 +16,7 @@ import (
 )
 
 const (
-	goWatchInterval   = 500 * time.Millisecond
+	watchInterval     = 500 * time.Millisecond
 	goRestartDebounce = 300 * time.Millisecond
 )
 
@@ -23,12 +24,14 @@ const (
 // process. It blocks until the parent context is cancelled (SIGINT/SIGTERM).
 type devRunner struct {
 	sourceDir string // frontend source directory (from revelt.json)
+	clientDir string // Output path for all client files in dist e.g "frontend/dist/client"
 	goArgs    []string
 }
 
-func runDev(ctx context.Context, sourceDir string) {
+func runDev(ctx context.Context, sourceDir string, clientOutDir string) {
 	r := &devRunner{
 		sourceDir: sourceDir,
+		clientDir: clientOutDir,
 		goArgs:    []string{"run", "."},
 	}
 	r.run(ctx)
@@ -46,8 +49,17 @@ func (r *devRunner) run(ctx context.Context) {
 		r.runNodeWatcher(nodeCtx)
 	}()
 
+	// Watch changes in frontend/dist/client to restart go application since we are embedding assets
+	// =============================================================================================
+	restart := make(chan struct{}, 2) // watched by 2 goroutines
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r.watchFrontEndForChanges(ctx, restart)
+	}()
+
 	// Run and auto-restart the Go server whenever .go files change.
-	r.runGoWithRestart(ctx)
+	r.runGoWithRestart(ctx, restart)
 
 	nodeCancel()
 	wg.Wait()
@@ -85,11 +97,48 @@ func (r *devRunner) runNodeWatcher(ctx context.Context) {
 	}
 }
 
+func (r *devRunner) watchFrontEndForChanges(ctx context.Context, restart chan struct{}) {
+	matchClientAsset := func(path string, d fs.DirEntry) bool {
+		switch filepath.Ext(path) {
+		case ".js", ".css", ".html", ".map":
+			return true
+		}
+		return false
+	}
+
+	hashes := collectHashes(r.clientDir, matchClientAsset)
+	ticker := time.NewTicker(watchInterval)
+	defer ticker.Stop()
+
+	var pendingRestart bool
+	var lastChange time.Time
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if changed, current := hasFileChangedByHash(r.clientDir, hashes, matchClientAsset); changed {
+				hashes = current
+				pendingRestart = true
+				lastChange = time.Now()
+			}
+
+			if pendingRestart && time.Since(lastChange) >= goRestartDebounce {
+				select {
+				case restart <- struct{}{}:
+				default:
+				}
+				pendingRestart = false
+			}
+		}
+	}
+}
+
 // runGoWithRestart watches .go and config files, compiles, and restarts the Go process.
-func (r *devRunner) runGoWithRestart(ctx context.Context) {
+func (r *devRunner) runGoWithRestart(ctx context.Context, restart chan struct{}) {
 	var (
 		cmd           *exec.Cmd
-		restart       = make(chan struct{}, 1)
 		processExited = make(chan error, 1)
 		binName       = "./revelt_bin"
 	)
@@ -107,9 +156,13 @@ func (r *devRunner) runGoWithRestart(ctx context.Context) {
 	}
 
 	// File watcher goroutine.
+	matchGoSource := func(path string, d fs.DirEntry) bool {
+		return filepath.Ext(path) == ".go" || d.Name() == "revelt.json"
+	}
+
 	go func() {
-		mtimes := collectMtimes(".")
-		ticker := time.NewTicker(goWatchInterval)
+		mtimes := collectMtimes(".", matchGoSource)
+		ticker := time.NewTicker(watchInterval)
 		defer ticker.Stop()
 
 		var pendingRestart bool
@@ -120,7 +173,7 @@ func (r *devRunner) runGoWithRestart(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if changed, current := hasGoFileChanged(".", mtimes); changed {
+				if changed, current := hasFileChanged(".", mtimes, matchGoSource); changed {
 					mtimes = current
 					pendingRestart = true
 					lastChange = time.Now()
@@ -189,8 +242,10 @@ func (r *devRunner) runGoWithRestart(ctx context.Context) {
 	}
 }
 
-// collectMtimes returns a map of path → mtime for all .go files and revelt.json under root.
-func collectMtimes(root string) map[string]time.Time {
+// collectMtimes returns a map of path → mtime for files under root that
+// satisfy match. Hidden directories and common build/dependency folders
+// are always skipped.
+func collectMtimes(root string, match func(path string, d fs.DirEntry) bool) map[string]time.Time {
 	mtimes := make(map[string]time.Time, 64)
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -203,7 +258,6 @@ func collectMtimes(root string) map[string]time.Time {
 			if path == root {
 				return nil
 			}
-			// Skip hidden directories and common build/dependency folders
 			if strings.HasPrefix(name, ".") {
 				return filepath.SkipDir
 			}
@@ -214,7 +268,7 @@ func collectMtimes(root string) map[string]time.Time {
 			return nil
 		}
 
-		if filepath.Ext(path) == ".go" || name == "revelt.json" {
+		if match(path, d) {
 			info, err := d.Info()
 			if err == nil {
 				mtimes[path] = info.ModTime()
@@ -225,15 +279,69 @@ func collectMtimes(root string) map[string]time.Time {
 	return mtimes
 }
 
-// hasGoFileChanged compares the current file mtimes under root against the
+// hasFileChanged compares the current file mtimes under root against the
 // previously recorded snapshot.
-func hasGoFileChanged(root string, prev map[string]time.Time) (bool, map[string]time.Time) {
-	current := collectMtimes(root)
+func hasFileChanged(root string, prev map[string]time.Time, match func(path string, d fs.DirEntry) bool) (bool, map[string]time.Time) {
+	current := collectMtimes(root, match)
 	if len(current) != len(prev) {
 		return true, current
 	}
 	for path, mtime := range current {
 		if prev[path] != mtime {
+			return true, current
+		}
+	}
+	return false, current
+}
+
+// collectHashes returns a map of path → content hash (SHA-256) for files
+// under root that satisfy match. Used instead of mtime comparison for
+// directories where files may be rewritten with identical content on every
+// build (e.g. Vite's asset injection), which would otherwise cause false
+// positives on plain mtime checks.
+func collectHashes(root string, match func(path string, d fs.DirEntry) bool) map[string][32]byte {
+	hashes := make(map[string][32]byte, 64)
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+
+		name := d.Name()
+
+		if d.IsDir() {
+			if path == root {
+				return nil
+			}
+			if strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			switch name {
+			case "node_modules", "dist", "build", "bin", "tmp", "temp", "vendor", "coverage":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if match(path, d) {
+			data, err := os.ReadFile(path)
+			if err == nil {
+				hashes[path] = sha256.Sum256(data)
+			}
+		}
+		return nil
+	})
+	return hashes
+}
+
+// hasFileChangedByHash compares the current file content hashes under root
+// against the previously recorded snapshot.
+func hasFileChangedByHash(root string, prev map[string][32]byte, match func(path string, d fs.DirEntry) bool) (bool, map[string][32]byte) {
+	current := collectHashes(root, match)
+	if len(current) != len(prev) {
+		return true, current
+	}
+	for path, hash := range current {
+		if prev[path] != hash {
 			return true, current
 		}
 	}

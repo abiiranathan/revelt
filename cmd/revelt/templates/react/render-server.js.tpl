@@ -5,6 +5,16 @@ import { COMPONENT_REGISTRY } from 'revelt:registry';
 
 process.stdin.setEncoding('utf8');
 
+process.on('uncaughtException', (err) => {
+    process.stderr.write('[revelt] uncaught exception: ' + (err.stack ?? err.message) + '\n');
+    process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+    process.stderr.write('[revelt] unhandled rejection: ' + (reason?.stack ?? reason) + '\n');
+    process.exit(1);
+});
+
 const rl = createInterface({
     input: process.stdin,
     crlfDelay: Infinity,

@@ -354,7 +354,7 @@ func runDevCmd() {
 	fmt.Printf("[revelt] frontend source: %s\n", cfg.SourceDir)
 	fmt.Println("[revelt] watching .go files for changes (Ctrl-C to stop)")
 
-	runDev(ctx, cfg.SourceDir)
+	runDev(ctx, cfg.SourceDir, filepath.Join(cfg.OutDir, "client"))
 
 	fmt.Println("[revelt] development environment stopped.")
 }
