@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"html/template"
 	"io"
@@ -119,6 +120,8 @@ type appOptions struct {
 
 	// disableCompression disables on-the-fly gzip compression for static assets.
 	disableCompression bool
+
+	tlsConfig *tls.Config
 }
 
 // AppOption configures an App during construction.
@@ -154,6 +157,20 @@ func WithMiddleware(mw ...func(http.Handler) http.Handler) AppOption {
 // WithLogger sets a custom logger for the App. Defaults to log.Default().
 func WithLogger(l *log.Logger) AppOption {
 	return func(o *appOptions) { o.logger = l }
+}
+
+// WithTLSConfig configures server with Certificates to use and auto-matically enables https
+func WithTLSConfig(cert, key string) AppOption {
+	return func(o *appOptions) {
+		cert, err := tls.LoadX509KeyPair(cert, key)
+		if err != nil {
+			panic("failed to load certificate pair: " + err.Error())
+		}
+
+		o.tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+		}
+	}
 }
 
 // WithErrorHandler replaces the default error handler used when a HandlerFunc
@@ -219,6 +236,7 @@ func newAppWithConfig(ctx context.Context, cfg *ProjectConfig, staticFS http.Fil
 		shutdownTimeout: shutdownTimeout,
 		logger:          log.Default(),
 		errorHandler:    defaultErrorHandler,
+		tlsConfig:       nil,
 	}
 	for _, opt := range opts {
 		opt(&o)
@@ -594,13 +612,21 @@ func (a *App) Run() {
 		ReadTimeout:  a.opts.readTimeout,
 		WriteTimeout: a.opts.writeTimeout,
 		IdleTimeout:  a.opts.idleTimeout,
+		TLSConfig:    a.opts.tlsConfig,
 	}
 
 	a.opts.logger.Printf("[revelt] listening on http://localhost:%d", a.cfg.Port)
 
 	go func() {
-		if err := a.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			a.opts.logger.Fatalf("[revelt] server error: %v", err)
+		var err error
+		if a.srv.TLSConfig != nil && len(a.srv.TLSConfig.Certificates) > 0 {
+			// pass empty names since certs are populated.
+			err = a.srv.ListenAndServeTLS("", "")
+		} else {
+			a.srv.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
+			a.opts.logger.Fatalf("[revelt] server error: %v\n", err)
 		}
 	}()
 
