@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/abiiranathan/revelt/revelt"
+	"github.com/abiiranathan/revelt"
 )
 
 // echoServer writes a temporary CommonJS harness to simulate the Node subprocess interface.

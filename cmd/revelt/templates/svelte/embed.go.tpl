@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/abiiranathan/revelt/revelt"
+	"github.com/abiiranathan/revelt"
 )
 
 // StaticAssets embeds frontend client-side static bundles for production.

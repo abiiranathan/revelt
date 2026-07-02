@@ -11,7 +11,7 @@ import (
 	"encoding/json" // for json.NewEncoder
 	"net/http"      // for http.Handler, http.ResponseWriter, http.Request
 
-	"github.com/abiiranathan/revelt/revelt"
+	"github.com/abiiranathan/revelt"
 )
 
 // poolStatter is satisfied by *revelt.Renderer. Defined here as a narrow

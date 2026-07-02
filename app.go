@@ -60,9 +60,9 @@ type HandlerFunc func(http.ResponseWriter, *http.Request) error
 // The default implementation logs the error and writes a plain-text 500.
 type ErrorHandlerFunc func(http.ResponseWriter, *http.Request, error)
 
-// adapt wraps a HandlerFunc in a plain http.Handler. The returned handler calls
+// Adapt wraps a HandlerFunc in a plain http.Handler. The returned handler calls
 // fn and, on error, delegates to errHandler to write the response.
-func adapt(fn HandlerFunc, errHandler ErrorHandlerFunc) http.Handler {
+func Adapt(fn HandlerFunc, errHandler ErrorHandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := fn(w, r); err != nil {
 			errHandler(w, r, err)
@@ -70,9 +70,9 @@ func adapt(fn HandlerFunc, errHandler ErrorHandlerFunc) http.Handler {
 	})
 }
 
-// defaultErrorHandler logs err and responds with a 500 Internal Server Error.
+// DefaultErrorHandler logs err and responds with a 500 Internal Server Error.
 // It is the fallback when no ErrorHandler is configured via WithErrorHandler.
-func defaultErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
+func DefaultErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	log.Printf("[revelt] handler error %s %s: %v\n", r.Method, r.URL.Path, err)
 	http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 }
@@ -235,7 +235,7 @@ func newAppWithConfig(ctx context.Context, cfg *ProjectConfig, staticFS http.Fil
 		idleTimeout:     120 * time.Second,
 		shutdownTimeout: shutdownTimeout,
 		logger:          log.Default(),
-		errorHandler:    defaultErrorHandler,
+		errorHandler:    DefaultErrorHandler,
 		tlsConfig:       nil,
 	}
 	for _, opt := range opts {
@@ -292,13 +292,13 @@ func newAppWithConfig(ctx context.Context, cfg *ProjectConfig, staticFS http.Fil
 // a non-nil error the App's ErrorHandler is invoked to write the response.
 // Pattern syntax follows [http.ServeMux].
 func (a *App) Handle(pattern string, handler HandlerFunc) {
-	a.mux.Handle(pattern, adapt(handler, a.opts.errorHandler))
+	a.mux.Handle(pattern, Adapt(handler, a.opts.errorHandler))
 }
 
 // HandleFunc registers a HandlerFunc function for the given pattern.
 // If the handler returns a non-nil error the App's ErrorHandler is invoked.
 func (a *App) HandleFunc(pattern string, handler HandlerFunc) {
-	a.mux.Handle(pattern, adapt(handler, a.opts.errorHandler))
+	a.mux.Handle(pattern, Adapt(handler, a.opts.errorHandler))
 }
 
 // HandleStd registers a standard library http.Handler for the given pattern.

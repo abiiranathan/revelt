@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/abiiranathan/revelt/revelt"
+	"github.com/abiiranathan/revelt"
 )
 
 func TestFullIntegration_Workflow(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/abiiranathan/revelt/revelt"
+	"github.com/abiiranathan/revelt"
 )
 
 func main() {
